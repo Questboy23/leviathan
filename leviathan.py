@@ -1,23 +1,34 @@
-#!/opt/homebrew/bin/python3
-"""MacSafe: quiet, local Mac protection. Every action is logged and undoable.
-Commands: scan-downloads | scan-apps | scan-persist | sweep [--fix] | check-cmd CMD |
-          pwwatch SECONDS | undo ID | status | verify | fix-chrome-notify"""
+#!/usr/bin/env python3
+"""Leviathan: stops viruses before they run on a Mac. Every action is logged and undoable.
+Commands: scan | scan-downloads | scan-apps | scan-persist | sweep [--fix] | check-cmd CMD |
+          pwwatch | undo ID | undo-settings | status | verify | contain PATH | fix-chrome-notify"""
 import datetime, hashlib, json, os, plistlib, re, shutil, subprocess, sys, time
 
+os.umask(0o077)  # the log and quarantine are readable by you only
 HOME = os.path.expanduser("~")
-STATE = os.environ.get("MACSAFE_STATE", os.path.join(HOME, ".macsafe"))
+IS_ROOT = os.geteuid() == 0
+ROOT_DIR = "/var/db/leviathan"
+ROOT_TOOL = "/Library/Application Support/Leviathan/leviathan-root"
+# root keeps its own log in a root-owned folder, so nothing you can edit is ever run as root
+STATE = ROOT_DIR if IS_ROOT else os.environ.get("LEVIATHAN_STATE", os.path.join(HOME, ".leviathan"))
 QUAR = os.path.join(STATE, "quarantine")
 LEDGER = os.path.join(STATE, "ledger.jsonl")
 SEEN = os.path.join(STATE, "seen.json")
-BLOCKLIST = "/var/db/macsafe/blocklist.txt" if os.path.exists("/var/db/macsafe/blocklist.txt") else os.path.join(STATE, "blocklist.txt")
+BLOCKLIST = os.path.join(ROOT_DIR, "blocklist.txt") if os.path.exists(os.path.join(ROOT_DIR, "blocklist.txt")) else os.path.join(STATE, "blocklist.txt")
 EXTRA_YARA = os.path.join(STATE, "extra.yara")
-DOWNLOADS = os.environ.get("MACSAFE_DOWNLOADS", os.path.join(HOME, "Downloads"))
-XPROTECT_YARA = "/Library/Apple/System/Library/CoreServices/XProtect.bundle/Contents/Resources/XProtect.yara"
-YARA = shutil.which("yara") or "/opt/homebrew/bin/yara"
+DOWNLOADS = os.environ.get("LEVIATHAN_DOWNLOADS", os.path.join(HOME, "Downloads"))
+_XP = ["/private/var/protected/xprotect/XProtect.bundle/Contents/Resources/XProtect.yara",
+       "/Library/Apple/System/Library/CoreServices/XProtect.bundle/Contents/Resources/XProtect.yara"]
+_XP = [p for p in _XP if os.path.exists(p)]
+XPROTECT_YARA = max(_XP, key=os.path.getmtime) if _XP else "/nonexistent"  # newest copy of Apple's rules
+YARA = next((p for p in ("/opt/homebrew/bin/yara", "/usr/local/bin/yara") if os.path.exists(p)), shutil.which("yara") or "/opt/homebrew/bin/yara")
+if IS_ROOT and not (os.path.exists(YARA) and os.stat(YARA).st_uid == 0):
+    YARA = "/nonexistent"  # root never runs a yara binary that a normal user could have replaced
+APP_DIRS = os.environ.get("LEVIATHAN_APP_DIRS", "/Applications:" + os.path.join(HOME, "Applications")).split(":")
 PERSIST_DIRS = [os.path.join(HOME, "Library/LaunchAgents"), "/Library/LaunchAgents", "/Library/LaunchDaemons"]
-if os.environ.get("MACSAFE_PERSIST_DIRS"):
-    PERSIST_DIRS = os.environ["MACSAFE_PERSIST_DIRS"].split(":")
-QUIET = os.environ.get("MACSAFE_QUIET") == "1"
+if os.environ.get("LEVIATHAN_PERSIST_DIRS"):
+    PERSIST_DIRS = os.environ["LEVIATHAN_PERSIST_DIRS"].split(":")
+QUIET = os.environ.get("LEVIATHAN_QUIET") == "1"
 SKIP_SUFFIX = (".crdownload", ".download", ".part", ".tmp")
 
 
@@ -30,11 +41,13 @@ def run(argv, timeout=60):
 
 
 # ---------- tamper-proof ledger ----------
-def _entries():
-    if not os.path.exists(LEDGER):
+def _entries(path=None):
+    path = path or LEDGER
+    try:
+        with open(path) as f:
+            return [json.loads(l) for l in f if l.strip()]
+    except (OSError, ValueError):
         return []
-    with open(LEDGER) as f:
-        return [json.loads(l) for l in f if l.strip()]
 
 
 def _hash(prev, entry):
@@ -52,6 +65,8 @@ def ledger_add(kind, **data):
     e["hash"] = _hash(prev, e)
     with open(LEDGER, "a") as f:
         f.write(json.dumps(e) + "\n")
+    if IS_ROOT:
+        os.chmod(LEDGER, 0o644)
     return e["id"]
 
 
@@ -71,10 +86,29 @@ def notify(msg):
         print("NOTIFY:", msg)
         return
     safe = msg.replace("\\", "").replace('"', "'")
-    run(["osascript", "-e", f'display notification "{safe}" with title "MacSafe"'])
+    run(["osascript", "-e", f'display notification "{safe}" with title "Leviathan"'])
 
 
 # ---------- detection ----------
+def _compiled(rules):
+    """Compiles a rule file once (about 4 s for Apple's rules) and reuses it until the rules change."""
+    yarac = os.path.join(os.path.dirname(YARA), "yarac")
+    if not os.path.exists(yarac):
+        return None
+    dst = os.path.join(STATE, "rules-%s.yarc" % hashlib.sha256(rules.encode()).hexdigest()[:12])
+    try:
+        if os.path.exists(dst) and os.path.getmtime(dst) >= os.path.getmtime(rules):
+            return dst
+        os.makedirs(STATE, exist_ok=True)
+        tmp = dst + ".tmp"
+        if run([yarac, "-w", rules, tmp], timeout=180)[0] == 0:
+            os.replace(tmp, dst)
+            return dst
+    except OSError:
+        pass
+    return None
+
+
 def yara_hits(target):
     hits = []
     if not os.path.exists(YARA):
@@ -83,9 +117,39 @@ def yara_hits(target):
         target = os.path.join(target, "Contents/MacOS")  # scan the app's programs, not its images and fonts
     for rules in (XPROTECT_YARA, EXTRA_YARA):
         if os.path.exists(rules):
-            code, out = run([YARA, "-w", "-r", rules, target], timeout=120)
+            compiled = _compiled(rules)
+            argv = [YARA, "-w", "-r", "-C", compiled, target] if compiled else [YARA, "-w", "-r", rules, target]
+            code, out = run(argv, timeout=120)
             hits += [l.split()[0] for l in out.splitlines() if l.strip() and not l.startswith("error")]
     return hits
+
+
+def batch_yara(targets):
+    """Checks many apps in one yara run, so the rules load once. Returns {target: first rule hit}."""
+    if not os.path.exists(YARA) or not targets:
+        return {}
+    dirs = {}
+    for t in targets:
+        d = os.path.join(t, "Contents/MacOS") if os.path.isdir(os.path.join(t, "Contents/MacOS")) else t
+        dirs[d] = t
+    lst = os.path.join(STATE, "scan-list.txt")
+    os.makedirs(STATE, exist_ok=True)
+    with open(lst, "w") as f:
+        f.write("\n".join(dirs) + "\n")
+    found = {}
+    for rules in (XPROTECT_YARA, EXTRA_YARA):
+        if not os.path.exists(rules):
+            continue
+        compiled = _compiled(rules)
+        argv = [YARA, "-w", "-r", "--scan-list"] + (["-C", compiled] if compiled else [rules]) + [lst]
+        code, out = run(argv, timeout=1800)
+        for line in out.splitlines():
+            rule, _, path = line.partition(" ")
+            for d, t in dirs.items():
+                if path == d or path.startswith(d + "/"):
+                    found.setdefault(t, rule)
+    os.remove(lst)
+    return found
 
 
 def blocklist():
@@ -170,20 +234,23 @@ def contain(path, reason, after=None):
                 pass
     i = ledger_add("contained", path=path, reason=reason,
                    undo={"type": "move", "src": dst, "dst": path, "modes": modes, "after": after or []})
-    notify(f"Removed a threat: {os.path.basename(path)}. It can't run. Undo: macsafe undo {i}")
+    notify(f"Removed a threat: {os.path.basename(path)}. It can't run. Undo: leviathan undo {i}")
     start_pwwatch()
     return i
 
 
-def label(path, reason):
-    tag = plistlib.dumps(["MacSafe unverified\n5"], fmt=plistlib.FMT_BINARY).hex()
-    run(["xattr", "-wx", "com.apple.metadata:_kMDItemUserTags", tag, path])
-    ledger_add("labeled", path=path, reason=reason,
-               undo={"type": "cmd", "argv": ["xattr", "-d", "com.apple.metadata:_kMDItemUserTags", path]})
-    start_pwwatch()
+def note(path, reason):
+    """Unsigned is not malware. It is never moved or labeled, only noted in the private log."""
+    ledger_add("noticed", path=path, reason=reason)
+    start_pwwatch()  # fake password boxes often follow an unsigned download
 
 
 def undo(i):
+    try:
+        i = int(i)
+    except ValueError:
+        print("Use the number shown by `leviathan`, like: leviathan undo 12")
+        return
     es = _entries()
     if any(e["kind"] == "undone" and e.get("ref") == i for e in es):
         print(f"Entry {i} was already undone.")
@@ -255,7 +322,7 @@ def scan_dir(folder, key, only_apps=False):
         if level == "bad":
             contain(p, why)
         elif level == "unverified" and not first:
-            label(p, why)
+            note(p, why)
     _save_seen(seen)
 
 
@@ -324,7 +391,7 @@ def scan_persist():
                     contain(p, why, after=[["launchctl", "bootstrap", f"gui/{uid}", p]])
                 else:
                     ledger_add("flagged", path=p, reason=why)
-                    notify(f"Found a threat that needs your password to remove: {n}. Run: sudo macsafe contain '{p}'")
+                    notify(f"Found a threat that needs your password to remove: {n}. Run: sudo \"{ROOT_TOOL}\" contain '{p}'")
             elif level == "unverified":
                 ledger_add("noticed", path=p, reason=why)
     _save_seen(seen)
@@ -341,7 +408,7 @@ def start_pwwatch(seconds=900):
         running = os.path.exists(PW_LOCK) and float(open(PW_LOCK).read() or 0) > time.time()
         with open(PW_LOCK, "w") as f:
             f.write(str(until))
-        if not running and not os.environ.get("MACSAFE_NO_SPAWN"):
+        if not running and not os.environ.get("LEVIATHAN_NO_SPAWN"):
             subprocess.Popen([sys.executable, os.path.abspath(__file__), "pwwatch"],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     except Exception:
@@ -362,7 +429,7 @@ def pwwatch():
         code, out = run(["ps", "-axo", "pid=,command="])
         for line in out.splitlines():
             line = line.strip()
-            if FAKE_PW.search(line) and "macsafe" not in line:
+            if FAKE_PW.search(line) and "leviathan" not in line:
                 pid = line.split()[0]
                 run(["kill", "-9", pid])
                 ledger_add("blocked", what="fake password box", detail=line[:300])
@@ -371,10 +438,16 @@ def pwwatch():
 
 
 # ---------- paste guard explanations ----------
-TRUSTED_INSTALLERS = ("raw.githubusercontent.com/homebrew/", "brew.sh", "sh.rustup.rs", "astral.sh",
-                      "bun.sh", "deno.land", "claude.ai/install", "ollama.com/install", "get.pnpm.io",
-                      "raw.githubusercontent.com/nvm-sh/", "install.python-poetry.org", "fly.io/install",
-                      "supabase.com", "vercel.com", "cli.github.com", "sdk.cloud.google.com")
+TRUSTED_INSTALLERS = ("raw.githubusercontent.com/homebrew/", "brew.sh/", "sh.rustup.rs/", "astral.sh/",
+                      "bun.sh/", "deno.land/", "claude.ai/install", "ollama.com/install", "get.pnpm.io/",
+                      "raw.githubusercontent.com/nvm-sh/", "install.python-poetry.org/", "fly.io/install",
+                      "cli.github.com/", "sdk.cloud.google.com/")
+
+
+def _trusted(u):
+    """u is a lowercased URL without its scheme. Host must match exactly; a trailing dot or port is not allowed."""
+    u = u if "/" in u else u + "/"
+    return any(u.startswith(t) for t in TRUSTED_INSTALLERS)
 RULES = [
     (r"(curl|wget)\b[^|;&]*\|\s*(sudo\s+)?(/bin/|/usr/bin/)?(ba|z|da|k)?sh\b", "downloads a program from the internet and runs it immediately"),
     (r"(curl|wget)\b[^|;&]*\|\s*(sudo\s+)?(python\d*|perl|ruby|osascript|node)\b", "downloads code from the internet and runs it immediately"),
@@ -398,7 +471,7 @@ def check_cmd(line):
     urls = re.findall(r"https?://([^\s\"'|)]+)", low)
     for pat, why in RULES:
         if re.search(pat, low):
-            if urls and all(u.startswith(TRUSTED_INSTALLERS) for u in urls):
+            if urls and all(_trusted(u) for u in urls):
                 return ""
             return f"It {why}. Fake 'fix' and 'verify you're human' pages ask people to paste commands like this."
     return ""
@@ -460,8 +533,9 @@ def sweep_system(fix):
     if "On" in rl:
         out.append(("issue", "Remote login (SSH) is on. Turn off in System Settings > General > Sharing if unused"))
     prof = _read(["profiles", "list"])
-    if prof and "There are no" not in prof:
-        out.append(("issue", "Settings profiles installed (check System Settings > Privacy & Security > Profiles): " + prof[:200]))
+    ids = sorted(set(re.findall(r"profileIdentifier:\s*(\S+)", prof)))
+    if ids:
+        out.append(("issue", "Settings profiles installed, check they are ones you added (System Settings > General > Device Management): " + ", ".join(ids)))
     return out
 
 
@@ -501,7 +575,7 @@ def chrome_report():
         name = os.path.basename(os.path.dirname(pf))
         spam = _spam_sites(prefs, bl)
         if spam:
-            out.append(("issue", f"Chrome ({name}): {len(spam)} likely spam sites can send you notifications. Fix: quit Chrome, run: macsafe fix-chrome-notify"))
+            out.append(("issue", f"Chrome ({name}): {len(spam)} likely spam sites can send you notifications. Fix: quit Chrome, run: leviathan fix-chrome-notify"))
         url = prefs.get("default_search_provider_data", {}).get("template_url_data", {}).get("url", "")
         if url and not any(g in url for g in GOOD_SEARCH):
             out.append(("issue", f"Chrome ({name}) search engine looks hijacked: {url[:80]}. Fix in Chrome Settings > Search engine"))
@@ -520,7 +594,7 @@ def fix_chrome_notify():
         spam = _spam_sites(prefs, bl)
         if not spam:
             continue
-        backup = pf + ".macsafe-" + time.strftime("%Y%m%d%H%M%S")
+        backup = pf + ".leviathan-" + time.strftime("%Y%m%d%H%M%S")
         shutil.copy2(pf, backup)
         ex = prefs["profile"]["content_settings"]["exceptions"]["notifications"]
         for pat in spam:
@@ -528,19 +602,112 @@ def fix_chrome_notify():
         json.dump(prefs, open(pf, "w"))
         ledger_add("setting", setting=f"Chrome: revoked notifications for {len(spam)} spam sites",
                    undo={"type": "move", "src": backup, "dst": pf})
-        print(f"Revoked {len(spam)} spam notification sites. Undo with macsafe undo.")
+        print(f"Revoked {len(spam)} spam notification sites. Undo with leviathan undo.")
+
+
+# ---------- full scan (read-only) ----------
+def _listeners():
+    """Programs accepting connections from other computers, not just this Mac."""
+    code, out = run(["lsof", "+c", "0", "-nP", "-iTCP", "-sTCP:LISTEN", "-F", "pcn"], timeout=30)
+    found, pid, prog = {}, "", ""
+    for line in out.splitlines():
+        tag, val = line[:1], line[1:]
+        if tag == "p":
+            pid = val
+        elif tag == "c":
+            prog = val.replace("\\x20", " ")
+        if tag != "n" or not pid:
+            continue
+        exe = run(["ps", "-p", pid, "-o", "comm="])[1].strip()
+        if exe.startswith(("/System/", "/usr/libexec/", "/usr/sbin/")):
+            continue  # macOS's own sharing services (AirPlay, Handoff) are expected
+        addr = val
+        host, _, port = addr.rpartition(":")
+        if host in ("127.0.0.1", "[::1]", "localhost") or host.startswith("127."):
+            continue
+        found.setdefault((prog, port), host)
+    return [f"{prog} accepts connections from your network on port {port}" for (prog, port) in sorted(found)]
+
+
+def full_scan():
+    """Checks everything once and changes nothing. Returns the number of threats."""
+    threats, issues = [], []
+    bl = blocklist()
+    apps = []
+    for d in APP_DIRS:
+        try:
+            apps += [os.path.join(d, n) for n in sorted(os.listdir(d)) if n.endswith(".app")]
+        except OSError:
+            pass
+    print(f"Leviathan scan: {len(apps)} apps, Downloads, auto-start items, network, settings. Changes nothing.\n")
+    print("  checking apps against Apple's malware rules...")
+    for p, rule in batch_yara(apps).items():
+        threats.append(f"{p}: matches Apple's malware rules ({rule})")
+    try:
+        dl = [os.path.join(DOWNLOADS, n) for n in os.listdir(DOWNLOADS) if not n.startswith(".")]
+    except OSError:
+        dl = []
+    archives = (".zip", ".dmg", ".pkg", ".mpkg", ".app", ".command", ".sh", ".jar", ".scpt")
+    dl = [p for p in dl if is_runnable(p) or p.lower().endswith(archives)]  # documents and photos can't run on their own
+    print(f"  checking {len(dl)} runnable downloads...")
+    small = [p for p in dl if os.path.isdir(p) or os.path.getsize(p) < 300_000_000]  # real malware installers are far smaller
+    for p, rule in batch_yara(small).items():
+        threats.append(f"{p}: matches Apple's malware rules ({rule})")
+    for p in dl:
+        hosts = [h for h in where_from(p) if domain_blocked(h, bl)]
+        if hosts:
+            threats.append(f"{p}: downloaded from a known malware or scam site ({hosts[0]})")
+    for d in PERSIST_DIRS:
+        try:
+            names = [n for n in os.listdir(d) if n.endswith(".plist")]
+        except OSError:
+            continue
+        for n in names:
+            level, why = persist_verdict(os.path.join(d, n))
+            if level == "bad":
+                threats.append(f"{os.path.join(d, n)}: {why}")
+    issues += _listeners()
+    for lvl, msg in sweep_system(False) + sweep_user(False):
+        if lvl == "issue":
+            issues.append(msg)
+    print("\nThreats (things no one wants on their computer):")
+    for t in threats or ["none found"]:
+        print("  " + t)
+    print("\nOpenings to close:")
+    for t in issues or ["none found"]:
+        print("  " + t)
+    if threats:
+        print("\nRemove a threat so it can't run (undoable): leviathan contain PATH")
+    if issues:
+        print("Fix the settings above automatically (undoable): leviathan sweep --fix, then sudo \"%s\" sweep --fix" % ROOT_TOOL)
+    return len(threats)
+
+
+def undo_settings():
+    """Reverses every setting change in this log that is not already undone."""
+    es = _entries()
+    done = {e.get("ref") for e in es if e["kind"] == "undone"}
+    for e in reversed(es):
+        if e["kind"] == "setting" and e["id"] not in done:
+            undo(e["id"])
 
 
 # ---------- status + main ----------
 def status():
     es = _entries()
     undone = {e.get("ref") for e in es if e["kind"] == "undone"}
-    shown = [e for e in es if e["kind"] in ("contained", "labeled", "setting", "blocked", "flagged")]
-    if not shown:
+    shown = [e for e in es if e["kind"] in ("contained", "setting", "blocked", "flagged")]
+    if not shown and not os.path.exists(os.path.join(ROOT_DIR, "ledger.jsonl")):
         print("Nothing has needed action yet.")
     for e in shown[-30:]:
-        tag = " (undone)" if e["id"] in undone else (f"   undo: macsafe undo {e['id']}" if "undo" in e else "")
+        tag = " (undone)" if e["id"] in undone else (f"   undo: leviathan undo {e['id']}" if "undo" in e else "")
         print(f"#{e['id']} {e['time'][:16]} {e['kind']}: {e.get('path') or e.get('setting') or e.get('what')} {('- ' + e['reason']) if e.get('reason') else ''}{tag}")
+    if not IS_ROOT:
+        rs = _entries(os.path.join(ROOT_DIR, "ledger.jsonl"))
+        rdone = {e.get("ref") for e in rs if e["kind"] == "undone"}
+        for e in [e for e in rs if e["kind"] in ("contained", "setting", "flagged")][-30:]:
+            tag = " (undone)" if e["id"] in rdone else (f"   undo: leviathan undo S{e['id']}" if "undo" in e else "")
+            print(f"#S{e['id']} {e['time'][:16]} system {e['kind']}: {e.get('path') or e.get('setting')}{tag}")
 
 
 def print_sweep(results):
@@ -576,7 +743,14 @@ def main():
     elif c == "pwwatch":
         pwwatch()
     elif c == "undo" and len(a) > 1:
-        undo(int(a[1]))
+        if a[1].upper().startswith("S") and not IS_ROOT:
+            print(f"System change. Run: sudo \"{ROOT_TOOL}\" undo {a[1][1:]}")
+        else:
+            undo(a[1].lstrip("Ss"))
+    elif c == "undo-settings":
+        undo_settings()
+    elif c == "scan":
+        sys.exit(1 if full_scan() else 0)
     elif c == "verify":
         sys.exit(0 if verify() else 1)
     elif c == "fix-chrome-notify":
