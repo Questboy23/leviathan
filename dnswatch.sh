@@ -1,6 +1,7 @@
 #!/bin/bash
-# Leviathan site-filter watchdog (runs as root every 20s). Never lets the filter break your internet.
-D=/var/db/leviathan; mkdir -p "$D/prev-dns"
+# MacSafe site-filter watchdog (runs as root every 20s). Never lets the filter break your internet.
+# Usage: dnswatch.sh <user_home>
+UHOME="$1"; D=/var/db/macsafe; mkdir -p "$D/prev-dns"
 MODE=$(cat "$D/mode" 2>/dev/null || echo filter)
 ROOTBL="$D/blocklist.txt"
 services() { networksetup -listallnetworkservices | tail -n +2 | sed 's/^\*//'; }
@@ -20,15 +21,15 @@ if [ "$MODE" = filter ]; then
 else
   if healthy && online; then use_filter; fi           # internet open again: filter back on
 fi
-# hourly feed refresh; only plain domain names get through
-if [ ! -s "$ROOTBL" ] || [ $(( $(date +%s) - $(stat -f %m "$ROOTBL") )) -gt 3600 ]; then
+# hourly feed refresh
+if [ ! -f "$ROOTBL" ] || [ $(( $(date +%s) - $(stat -f %m "$ROOTBL") )) -gt 3600 ]; then
   T=$(mktemp)
   if curl -fsSL --max-time 60 https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif.medium-onlydomains.txt -o "$T.h"; then
     curl -fsSL --max-time 30 https://openphish.com/feed.txt 2>/dev/null | sed -E 's#^https?://([^/:]+).*#\1#' > "$T.o"
     cat "$T.h" "$T.o" | grep -v '^#' | grep -E '^[A-Za-z0-9*._-]+$' | sort -u > "$T"
     if [ $(wc -l < "$T") -gt 1000 ]; then
       mv "$T" "$ROOTBL"; chmod 644 "$ROOTBL"
-      launchctl kickstart -k system/com.leviathan.dnscrypt 2>/dev/null
+      launchctl kickstart -k system/sh.brew.dnscrypt-proxy 2>/dev/null || launchctl kickstart -k system/homebrew.mxcl.dnscrypt-proxy 2>/dev/null
     fi
   fi
   rm -f "$T" "$T.h" "$T.o"
