@@ -1,6 +1,8 @@
-# MacSafe
+# Leviathan: quiet local malware protection for a Mac, with every action logged and undoable.
 
-MacSafe is quiet, local protection for a Mac. It stays silent unless it removes something or you are about to do something risky. Every action it takes is written to a tamper-evident log and can be undone.
+**Checks new downloads and apps against Apple's own XProtect malware rules.**
+
+Leviathan (its command is still `macsafe`, from its earlier name) is quiet, local protection for a Mac. It stays silent unless it removes something or you are about to do something risky. Every action it takes is written to a tamper-evident log and can be undone.
 
 ## What it does
 
