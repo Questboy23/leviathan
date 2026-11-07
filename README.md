@@ -1,6 +1,6 @@
 # Leviathan
 
-Leviathan (formerly MacSafe) is quiet, local protection for a Mac that stops most viruses, scams and risky pasted commands without bothering you. It stays silent unless it removes something or you are about to do something risky. Every action it takes is written to a tamper-evident log and can be undone.
+Leviathan (formerly MacSafe) is quiet, local protection for a Mac that contains known malware downloads, flags scam sites and stops risky pasted commands. It stays silent unless it removes something or you are about to do something risky. Every action it takes is written to a tamper-evident log and can be undone.
 
 ## What it does
 
