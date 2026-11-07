@@ -1,14 +1,15 @@
 #!/bin/bash
-# MacSafe installer. Run from Terminal: bash ~/macsafe/install.sh   (asks for your Mac password once)
+# MacSafe installer. Run from Terminal: bash ~/leviathan/install.sh   (asks for your Mac password once)
 set -e
-SRC="$(cd "$(dirname "$0")" && pwd)"; S="$HOME/.macsafe"; PY=/opt/homebrew/bin/python3; U=$(id -u)
+SRC="$(cd "$(dirname "$0")" && pwd)"; S="$HOME/.macsafe"; PY=$(for p in /opt/homebrew/bin/python3 /usr/local/bin/python3; do [ -x "$p" ] && { echo $p; break; }; done); PY=${PY:-$(command -v python3)}; U=$(id -u)
 echo "Installing MacSafe..."
 command -v brew >/dev/null || { echo "Needs Homebrew (brew.sh)."; exit 1; }
 brew list dnscrypt-proxy >/dev/null 2>&1 || brew install -q dnscrypt-proxy
 brew list yara >/dev/null 2>&1 || brew install -q yara
 mkdir -p "$S/bin" "$S/quarantine"; cp "$SRC"/macsafe.py "$SRC"/guard.bash "$SRC"/guard.zsh "$SRC"/dnswatch.sh "$S/bin/"
 chmod +x "$S/bin/"*.py "$S/bin/dnswatch.sh"; touch "$S/ledger.jsonl"
-mkdir -p "$HOME/.local/bin"; ln -sf "$S/bin/macsafe.py" "$HOME/.local/bin/macsafe"
+mkdir -p "$HOME/.local/bin"; echo "$PY" > "$S/python"
+printf '#!/bin/bash\nexec "%s" "%s/bin/macsafe.py" "$@"\n' "$PY" "$S" > "$HOME/.local/bin/macsafe"; chmod +x "$HOME/.local/bin/macsafe"
 
 # paste guard in both shells
 for rc in "$HOME/.bash_profile" "$HOME/.zshrc"; do
@@ -47,4 +48,4 @@ echo; echo "Settings check:"
 "$PY" "$S/bin/macsafe.py" sweep --fix
 sudo MACSAFE_STATE="$S" "$PY" "$S/bin/macsafe.py" sweep --fix
 echo; echo "MacSafe is on. It stays quiet unless it removes something or you do something risky."
-echo "See everything it did: macsafe   Undo anything: macsafe undo <number>   Remove it all: bash ~/macsafe/uninstall.sh"
+echo "See everything it did: macsafe   Undo anything: macsafe undo <number>   Remove it all: bash ~/leviathan/uninstall.sh"

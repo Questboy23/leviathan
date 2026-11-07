@@ -2,10 +2,12 @@
 # Root half of the installer: site filter + watchdog. Called by install.sh with sudo.
 set -e
 UHOME="$1"; D=/var/db/macsafe; mkdir -p "$D/prev-dns"; rm -f "$D/disabled"
-TOML=/opt/homebrew/etc/dnscrypt-proxy.toml
+BREW=$(for p in /opt/homebrew/bin/brew /usr/local/bin/brew; do [ -x "$p" ] && { echo $p; break; }; done); BREW=${BREW:-/opt/homebrew/bin/brew}
+PYB=$(for p in /opt/homebrew/bin/python3 /usr/local/bin/python3; do [ -x "$p" ] && { echo $p; break; }; done); PYB=${PYB:-$(command -v python3)}
+TOML="$(dirname "$(dirname "$BREW")")/etc/dnscrypt-proxy.toml"
 [ -f "$D/dnscrypt-proxy.toml.orig" ] || cp "$TOML" "$D/dnscrypt-proxy.toml.orig"
 cp "$UHOME/.macsafe/blocklist.txt" "$D/blocklist.txt" 2>/dev/null || touch "$D/blocklist.txt"
-/opt/homebrew/bin/python3 - "$D/dnscrypt-proxy.toml.orig" "$TOML" <<'EOF'
+"$PYB" - "$D/dnscrypt-proxy.toml.orig" "$TOML" <<'EOF'
 import re, sys
 s = open(sys.argv[1]).read()
 s = re.sub(r"(?m)^#?\s*server_names\s*=.*$", "server_names = ['quad9-doh-ip4-port443-filter-pri', 'cloudflare-security']", s, count=1)
@@ -23,7 +25,7 @@ networksetup -listallnetworkservices | tail -n +2 | sed 's/^\*//' | while read -
   cur=$(networksetup -getdnsservers "$s" 2>/dev/null)
   case "$cur" in *"aren't any"*|*127.0.0.1*) echo "" > "$f" ;; *) echo $cur > "$f" ;; esac
 done
-/opt/homebrew/bin/brew services restart dnscrypt-proxy >/dev/null 2>&1 || /opt/homebrew/bin/brew services start dnscrypt-proxy
+"$BREW" services restart dnscrypt-proxy >/dev/null 2>&1 || "$BREW" services start dnscrypt-proxy
 R="/Library/Application Support/MacSafe"; mkdir -p "$R"; install -m 755 -o root -g wheel "$UHOME/.macsafe/bin/dnswatch.sh" "$R/dnswatch.sh"
 cat > /Library/LaunchDaemons/com.macsafe.dnswatch.plist <<EOF
 <?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

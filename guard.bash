@@ -1,6 +1,6 @@
 # MacSafe paste guard for bash. Stops dangerous pasted/typed commands once; run again to proceed.
 case $- in *i*) ;; *) return 0 2>/dev/null ;; esac
-__ms_py=/opt/homebrew/bin/python3
+read -r __ms_py < "$HOME/.macsafe/python" 2>/dev/null || __ms_py=/opt/homebrew/bin/python3
 __ms_bin="$HOME/.macsafe/bin/macsafe.py"
 __ms_pat='(curl|wget|base64|xattr|osascript|/dev/tcp|spctl)'
 __ms_armed=0; __ms_rc=0; __ms_allow=""; __ms_lastnum=""

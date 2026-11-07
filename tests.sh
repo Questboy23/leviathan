@@ -1,6 +1,6 @@
 #!/bin/bash
 # MacSafe tests. Uses a throwaway folder; changes no system settings.
-PY=/opt/homebrew/bin/python3; SRC="$(cd "$(dirname "$0")" && pwd)"
+PY=$(for p in /opt/homebrew/bin/python3 /usr/local/bin/python3; do [ -x "$p" ] && { echo $p; break; }; done); PY=${PY:-$(command -v python3)}; SRC="$(cd "$(dirname "$0")" && pwd)"
 T=$(mktemp -d); export MACSAFE_STATE="$T/state" MACSAFE_DOWNLOADS="$T/dl" MACSAFE_QUIET=1 MACSAFE_NO_SPAWN=1
 export MACSAFE_PERSIST_DIRS="$T/agents"; mkdir -p "$MACSAFE_STATE" "$MACSAFE_DOWNLOADS" "$T/agents" "$T/.hidden"
 M="$PY $SRC/macsafe.py"; pass=0; fail=0
@@ -61,7 +61,7 @@ sed -i '' 's/invoice/invoyce/' "$MACSAFE_STATE/ledger.jsonl"
 ok "edited ledger is caught" '! $M verify >/dev/null'
 
 # 7. real Mac: Apple's malware rules load, real apps pass
-ok "Apple malware rules load in yara" '[ ! -x /opt/homebrew/bin/yara ] || /opt/homebrew/bin/yara -w /Library/Apple/System/Library/CoreServices/XProtect.bundle/Contents/Resources/XProtect.yara /bin/ls >/dev/null 2>&1'
+ok "Apple malware rules load in yara" 'YARA=$(command -v yara); [ -z "$YARA" ] || $YARA -w /Library/Apple/System/Library/CoreServices/XProtect.bundle/Contents/Resources/XProtect.yara /bin/ls >/dev/null 2>&1'
 ok "Chrome judged safe" '[ ! -d "/Applications/Google Chrome.app" ] || [ "$($PY -c "import sys;sys.path.insert(0,\"$SRC\");import macsafe;print(macsafe.verdict(\"/Applications/Google Chrome.app\")[0])")" = ok ]'
 
 echo; echo "$pass passed, $fail failed"; rm -rf "$T"

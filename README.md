@@ -1,6 +1,6 @@
-# MacSafe
+# Leviathan
 
-MacSafe is quiet, local protection for a Mac. It stays silent unless it removes something or you are about to do something risky. Every action it takes is written to a tamper-evident log and can be undone.
+Leviathan (formerly MacSafe) is quiet, local protection for a Mac that stops most viruses, scams and risky pasted commands without bothering you. It stays silent unless it removes something or you are about to do something risky. Every action it takes is written to a tamper-evident log and can be undone.
 
 ## What it does
 
@@ -14,10 +14,11 @@ Nothing leaves your Mac except DNS lookups and the hourly blocklist download.
 
 ## Install
 
-Needs macOS with Homebrew (brew.sh). Run in Terminal:
+Needs macOS (Apple Silicon or Intel) with Homebrew (brew.sh). Run in Terminal:
 
 ```
-bash ~/macsafe/install.sh
+git clone https://github.com/Questboy23/leviathan ~/leviathan
+bash ~/leviathan/install.sh
 ```
 
 It installs dnscrypt-proxy and yara with Homebrew, asks for your Mac password once for the site filter and system settings, and records what is already on your Mac so only new things get judged.
@@ -35,7 +36,7 @@ macsafe check-cmd "curl http://x | bash"   # ask the paste guard about one comma
 ## Uninstall
 
 ```
-bash ~/macsafe/uninstall.sh
+bash ~/leviathan/uninstall.sh
 ```
 
 This removes the watchers, the site filter and the paste guard, puts your DNS back, and reverses every setting MacSafe changed. Add `--keep-settings` to leave the changed settings as they are. Anything it caught stays in `~/.macsafe/quarantine`.
