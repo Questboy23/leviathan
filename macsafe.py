@@ -1,4 +1,4 @@
-#!/opt/homebrew/bin/python3
+#!/usr/bin/env python3
 """MacSafe: quiet, local Mac protection. Every action is logged and undoable.
 Commands: scan-downloads | scan-apps | scan-persist | sweep [--fix] | check-cmd CMD |
           pwwatch SECONDS | undo ID | status | verify | fix-chrome-notify"""
@@ -13,7 +13,7 @@ BLOCKLIST = "/var/db/macsafe/blocklist.txt" if os.path.exists("/var/db/macsafe/b
 EXTRA_YARA = os.path.join(STATE, "extra.yara")
 DOWNLOADS = os.environ.get("MACSAFE_DOWNLOADS", os.path.join(HOME, "Downloads"))
 XPROTECT_YARA = "/Library/Apple/System/Library/CoreServices/XProtect.bundle/Contents/Resources/XProtect.yara"
-YARA = shutil.which("yara") or "/opt/homebrew/bin/yara"
+YARA = shutil.which("yara") or next((p for p in ("/opt/homebrew/bin/yara", "/usr/local/bin/yara") if os.path.exists(p)), "/opt/homebrew/bin/yara")
 PERSIST_DIRS = [os.path.join(HOME, "Library/LaunchAgents"), "/Library/LaunchAgents", "/Library/LaunchDaemons"]
 if os.environ.get("MACSAFE_PERSIST_DIRS"):
     PERSIST_DIRS = os.environ["MACSAFE_PERSIST_DIRS"].split(":")
@@ -379,6 +379,7 @@ RULES = [
     (r"(curl|wget)\b[^|;&]*\|\s*(sudo\s+)?(/bin/|/usr/bin/)?(ba|z|da|k)?sh\b", "downloads a program from the internet and runs it immediately"),
     (r"(curl|wget)\b[^|;&]*\|\s*(sudo\s+)?(python\d*|perl|ruby|osascript|node)\b", "downloads code from the internet and runs it immediately"),
     (r"(eval|(ba|z)?sh\s+-c)\s*[\"']?\$\(\s*(curl|wget)", "runs code downloaded from the internet"),
+    (r"(\b(ba|z|da|k)?sh|\bsource|(^|\s)\.)\s+(-\S+\s+)*<\(\s*(curl|wget)", "runs code downloaded from the internet"),
     (r"base64\s+(-d|-D|--decode)", "unscrambles hidden text, usually to run something it doesn't want you to read"),
     (r"xattr\s+(-[a-z]*[dc][a-z]*\s+)*(-[a-z]*\s+)*com\.apple\.quarantine|xattr\s+-c", "removes Apple's safety check from a file"),
     (r"osascript.*(password|hidden answer)", "shows a fake password box to steal your Mac password"),

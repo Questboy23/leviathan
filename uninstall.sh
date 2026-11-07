@@ -1,7 +1,8 @@
 #!/bin/bash
 # Removes MacSafe completely and reverses every setting it changed.
 # Keeps ~/.macsafe/quarantine and the log so nothing it caught is lost. Add --keep-settings to leave settings as they are.
-S="$HOME/.macsafe"; PY=/opt/homebrew/bin/python3; U=$(id -u); LA="$HOME/Library/LaunchAgents"
+S="$HOME/.macsafe"; PY=$(for p in /opt/homebrew/bin/python3 /usr/local/bin/python3; do [ -x "$p" ] && { echo $p; break; }; done); PY=${PY:-$(command -v python3)}; U=$(id -u); LA="$HOME/Library/LaunchAgents"
+BREW=$(for p in /opt/homebrew/bin/brew /usr/local/bin/brew; do [ -x "$p" ] && { echo $p; break; }; done); BREW=${BREW:-/opt/homebrew/bin/brew}
 for j in watch weekly; do launchctl bootout gui/$U "$LA/com.macsafe.$j.plist" 2>/dev/null; rm -f "$LA/com.macsafe.$j.plist"; done
 if [ "$1" != "--keep-settings" ]; then
   for id in $("$PY" - "$S/ledger.jsonl" <<'EOF'
@@ -15,7 +16,7 @@ EOF
     if [ "$who" = root ]; then sudo MACSAFE_STATE="$S" "$PY" "$S/bin/macsafe.py" undo "$n"; else "$PY" "$S/bin/macsafe.py" undo "$n"; fi
   done
 fi
-sudo bash -c '
+sudo BREW="$BREW" bash -c '
   D=/var/db/macsafe; touch $D/disabled
   launchctl bootout system /Library/LaunchDaemons/com.macsafe.dnswatch.plist 2>/dev/null
   rm -f /Library/LaunchDaemons/com.macsafe.dnswatch.plist; rm -rf "/Library/Application Support/MacSafe"
@@ -23,8 +24,8 @@ sudo bash -c '
     f="$D/prev-dns/$(echo "$s" | tr "/ " "__")"; prev=$(cat "$f" 2>/dev/null); [ -z "$prev" ] && prev=Empty
     networksetup -setdnsservers "$s" $prev
   done
-  /opt/homebrew/bin/brew services stop dnscrypt-proxy >/dev/null 2>&1
-  [ -f $D/dnscrypt-proxy.toml.orig ] && cp $D/dnscrypt-proxy.toml.orig /opt/homebrew/etc/dnscrypt-proxy.toml
+  "$BREW" services stop dnscrypt-proxy >/dev/null 2>&1
+  [ -f $D/dnscrypt-proxy.toml.orig ] && cp $D/dnscrypt-proxy.toml.orig "$(dirname "$(dirname "$BREW")")/etc/dnscrypt-proxy.toml"
 '
 for rc in "$HOME/.bash_profile" "$HOME/.zshrc"; do [ -f "$rc" ] && sed -i '' '/# macsafe$/d' "$rc"; done
 rm -f "$HOME/.local/bin/macsafe"
