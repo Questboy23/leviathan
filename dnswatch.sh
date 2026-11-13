@@ -25,6 +25,21 @@ if [ ! -s "$ROOTBL" ] || [ $(( $(date +%s) - $(stat -f %m "$ROOTBL") )) -gt 3600
   T=$(mktemp)
   if curl -fsSL --max-time 60 https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif.medium-onlydomains.txt -o "$T.h"; then
     curl -fsSL --max-time 30 https://openphish.com/feed.txt 2>/dev/null | sed -E 's#^https?://([^/:]+).*#\1#' > "$T.o"
+    # Add MetaMask eth-phishing-detect blacklist when crypto mode is on
+    # Check crypto mode via leviathan settings
+    CRYPTO_ON=false
+    LEVIATHAN_STATE="${LEVIATHAN_STATE:-/var/db/leviathan}"
+    if [ -f "$LEVIATHAN_STATE/settings.json" ]; then
+      if grep -q '"crypto"[[:space:]]*:[[:space:]]*true' "$LEVIATHAN_STATE/settings.json"; then
+        CRYPTO_ON=true
+      fi
+    fi
+    if [ "$CRYPTO_ON" = true ]; then
+      curl -fsSL --max-time 30 https://raw.githubusercontent.com/MetaMask/eth-phishing-detect/main/src/config.json 2>/dev/null | \
+        python3 -c "import sys,json; data=json.load(sys.stdin); print('\n'.join(data.get('blocked', [])))" 2>/dev/null > "$T.m" || true
+    else
+      : > "$T.m"
+    fi
     # never block a shared host that millions of normal people use; a phishing page on it is one URL, the host is everyone's
     printf '%s\n' docs.google.com drive.google.com sites.google.com forms.gle storage.googleapis.com firebasestorage.googleapis.com \
       google.com www.google.com accounts.google.com github.com raw.githubusercontent.com gist.github.com objects.githubusercontent.com \
@@ -32,12 +47,12 @@ if [ ! -s "$ROOTBL" ] || [ $(( $(date +%s) - $(stat -f %m "$ROOTBL") )) -gt 3600
       login.microsoftonline.com office.com www.office.com s3.amazonaws.com icloud.com www.icloud.com apple.com www.apple.com \
       ipfs.io cloudflare-ipfs.com bit.ly t.co linktr.ee canva.com www.canva.com notion.so www.notion.so discord.com cdn.discordapp.com \
       telegra.ph t.me wetransfer.com we.tl mega.nz youtube.com www.youtube.com > "$T.k"
-    cat "$T.h" "$T.o" | grep -v '^#' | grep -E '^[A-Za-z0-9*._-]+$' | sed 's/^\*\.//' | grep -vxiF -f "$T.k" | sort -u > "$T"
+    cat "$T.h" "$T.o" "$T.m" | grep -v '^#' | grep -E '^[A-Za-z0-9*._-]+$' | sed 's/^\*\.//' | grep -vxiF -f "$T.k" | sort -u > "$T"
     if [ $(wc -l < "$T") -gt 1000 ]; then
       mv "$T" "$ROOTBL"; chmod 644 "$ROOTBL"
       launchctl kickstart -k system/com.leviathan.dnscrypt 2>/dev/null
     fi
   fi
-  rm -f "$T" "$T.h" "$T.o" "$T.k"
+  rm -f "$T" "$T.h" "$T.o" "$T.m" "$T.k"
 fi
 exit 0

@@ -924,17 +924,64 @@ def main():
                 print(LP.agents_check())
         elif len(a) > 1 and a[1] == "config":
             print(LP.agents_config_audit())
+        elif len(a) > 1 and a[1] == "tripped":
+            print(LP.agents_tripped())
+        elif len(a) > 1 and a[1] == "level":
+            if len(a) == 2:
+                lvl = LP.get_agent_level()
+                print(f"Current agent level: {lvl}")
+                print("Levels:")
+                for k, v in LP.agent_level_costs().items():
+                    print(f"  {k}: {v}")
+            elif a[2] in ("1", "2", "3"):
+                LP.set_agent_level(int(a[2]))
+                print(f"Agent level set to {a[2]}")
+            else:
+                print("Usage: leviathan agents level [1|2|3]")
+        elif len(a) > 1 and a[1] == "run":
+            if len(a) > 2:
+                print(LP.agents_run(a[2:]))
+            else:
+                print("Usage: leviathan agents run <command> [args...]")
+        elif len(a) > 1 and a[1] == "export":
+            if "--jsonl" in a:
+                print(LP.agents_export_jsonl())
+            else:
+                print("Usage: leviathan agents export --jsonl")
+        elif len(a) > 1 and a[1] == "monitor":
+            # Run level 2 monitoring checks
+            LP._agent_monitor_sensitive_access()
+            LP._agent_monitor_new_connections()
+            LP._agent_monitor_startup_edits()
+            print("Monitoring checks done.")
         else:
             procs = LP.agent_procs() if LP else []
             for pid, name in procs:
                 print(f"  {pid}  {name}")
             if not procs:
                 print("No AI agent processes found.")
-    elif c == "tor":
-        if LP:
-            print(LP.tor_check())
-        else:
+    elif c == "ai":
+        if not LP:
             print("levplus not available")
+        elif len(a) > 1 and a[1] == "safety":
+            print(LP.ai_safety_check())
+        elif len(a) > 1 and a[1] == "tuneup":
+            fix = "--fix" in a
+            print(LP.ai_tuneup(fix=fix))
+        else:
+            print("Usage: leviathan ai <safety|tuneup [--fix]>")
+    elif c == "vpn":
+        if not LP:
+            print("levplus not available")
+        elif len(a) > 1 and a[1] in ("status", "on", "off"):
+            if a[1] == "status":
+                print(LP.vpn_status())
+            elif a[1] == "on":
+                print(LP.vpn_on())
+            elif a[1] == "off":
+                print(LP.vpn_off())
+        else:
+            print("Usage: leviathan vpn <status|on|off>")
     else:
         status()
 

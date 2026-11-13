@@ -13,7 +13,7 @@ for f in dnscrypt-proxy yara python3; do
 done
 PY="$P/bin/python3"
 mkdir -p "$S/bin" "$S/quarantine"; chmod 700 "$S"
-cp "$SRC/leviathan.py" "$SRC/dnswatch.sh" "$SRC/install-root.sh" "$SRC/uninstall.sh" "$S/bin/"
+cp "$SRC/leviathan.py" "$SRC/levplus.py" "$SRC/bip39.txt" "$SRC/dnswatch.sh" "$SRC/install-root.sh" "$SRC/uninstall.sh" "$S/bin/"
 for g in bash zsh; do sed "s#__PY__#$PY#g" "$SRC/guard.$g" > "$S/bin/guard.$g"; done
 chmod +x "$S/bin/leviathan.py" "$S/bin/dnswatch.sh"; touch "$S/ledger.jsonl"; chmod 600 "$S/ledger.jsonl"
 mkdir -p "$HOME/.local/bin"; rm -f "$HOME/.local/bin/leviathan"
@@ -41,12 +41,52 @@ cat > "$LA/com.leviathan.weekly.plist" <<EOF
 <key>StartCalendarInterval</key><dict><key>Weekday</key><integer>0</integer><key>Hour</key><integer>11</integer><key>Minute</key><integer>17</integer></dict></dict></plist>
 EOF
 
+# persistwatch: runs scan-persist only when level >= 3 (the command itself checks level)
+cat > "$LA/com.leviathan.persistwatch.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>Label</key><string>com.leviathan.persistwatch</string>
+<key>ProgramArguments</key><array><string>$PY</string><string>$S/bin/leviathan.py</string><string>scan-persist</string></array>
+<key>WatchPaths</key><array><string>$HOME/Library/LaunchAgents</string><string>/Library/LaunchAgents</string><string>/Library/LaunchDaemons</string></array>
+<key>ThrottleInterval</key><integer>5</integer><key>LowPriorityIO</key><true/><key>Nice</key><integer>10</integer></dict></plist>
+EOF
+
 echo "Downloading scam and malware site lists..."
 curl -fsSL --max-time 90 https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif.medium-onlydomains.txt -o "$S/blocklist.txt" || echo "  (list download failed; it retries every hour)"
 
 # baseline: record what's already here so only new things get judged
 "$PY" "$S/bin/leviathan.py" scan-all
-for j in watch weekly; do launchctl bootout gui/$U "$LA/com.leviathan.$j.plist" 2>/dev/null || true; launchctl bootstrap gui/$U "$LA/com.leviathan.$j.plist"; done
+for j in watch weekly persistwatch; do launchctl bootout gui/$U "$LA/com.leviathan.$j.plist" 2>/dev/null || true; launchctl bootstrap gui/$U "$LA/com.leviathan.$j.plist"; done
+
+# Build and install menubar app if swiftc exists
+if command -v swiftc >/dev/null 2>&1; then
+    echo "Building menu bar app..."
+    cd "$SRC/menubar"
+    if bash build.sh 2>/dev/null; then
+        APP_SRC="$SRC/menubar/build/Leviathan Bar.app"
+        APP_DST="$HOME/Applications/Leviathan Bar.app"
+        mkdir -p "$HOME/Applications"
+        rm -rf "$APP_DST"
+        cp -R "$APP_SRC" "$APP_DST"
+        echo "Installed menu bar app to $APP_DST"
+        # LaunchAgent for menu bar app (RunAtLoad)
+        cat > "$LA/com.leviathan.bar.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>Label</key><string>com.leviathan.bar</string>
+<key>ProgramArguments</key><array><string>$APP_DST/Contents/MacOS/Leviathan Bar</string></array>
+<key>RunAtLoad</key><true/>
+<key>KeepAlive</key><true/>
+<key>EnvironmentVariables</key><dict><key>LEVIATHAN_BIN</key><string>$S/bin/leviathan.py</string></dict>
+</dict></plist>
+EOF
+        launchctl bootout gui/$U "$LA/com.leviathan.bar.plist" 2>/dev/null || true
+        launchctl bootstrap gui/$U "$LA/com.leviathan.bar.plist"
+        echo "Menu bar app LaunchAgent installed."
+    else
+        echo "  (menu bar app build failed; skipping)"
+    fi
+else
+    echo "swiftc not found; skipping menu bar app build."
+fi
 
 echo; echo "Your Mac password is needed once to turn on the site filter and safe settings."
 sudo bash "$SRC/install-root.sh" "$HOME" "$P"

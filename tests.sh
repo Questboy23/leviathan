@@ -167,4 +167,65 @@ ok "note-event logs to ledger" 'grep -q "test_kind" "$LEVIATHAN_STATE/ledger.jso
 $M -c "import sys;sys.path.insert(0,'$SRC');import levplus;print(levplus.wallet_apps())" >/dev/null
 ok "wallet_apps runs" '[ $? = 0 ]'
 
+# 8n. agent_level get/set
+$M agents level 1 >/dev/null
+ok "agent level set to 1" 'LEVIATHAN_STATE="$LEVIATHAN_STATE" $PY -c "import sys;sys.path.insert(0,\"$SRC\");import levplus;print(levplus.get_agent_level())" | grep -q "^1$"'
+$M agents level 3 >/dev/null
+ok "agent level set to 3" 'LEVIATHAN_STATE="$LEVIATHAN_STATE" $PY -c "import sys;sys.path.insert(0,\"$SRC\");import levplus;print(levplus.get_agent_level())" | grep -q "^3$"'
+
+# 8o. agents_canary_on creates tripwire instruction
+$M agents canary on >/dev/null
+ok "canary has tripwire instruction" 'grep -q "leviathan agents tripped" "$HOME/.leviathan-canary/aws_credentials"'
+ok "canary has unique marker" 'grep -q "Canary:" "$HOME/.leviathan-canary/aws_credentials"'
+
+# 8p. agents_tripped (just verify command exists)
+$M agents tripped 2>&1 | grep -q "Tripwire triggered"
+ok "agents tripped command runs" '[ $? = 0 ]'
+
+# 8q2. agents_tripped output contains expected string
+TRIPPED_OUT=$($M agents tripped 2>&1)
+ok "agents tripped output mentions tripwire" 'echo "$TRIPPED_OUT" | grep -q "Tripwire triggered"'
+
+# 8q. sandbox_profile_agent contains required denies
+PROF_AGENT=$($PY -c "import sys;sys.path.insert(0,'$SRC');import levplus;print(levplus.sandbox_profile_agent('/Users/test', 'container1', '/Users/test/project'))")
+ok "sandbox_profile_agent denies home" 'echo "$PROF_AGENT" | grep -q "deny file-read.*Users/test"'
+ok "sandbox_profile_agent allows project dir" 'echo "$PROF_AGENT" | grep -q "allow file-read.*Users/test/project"'
+ok "sandbox_profile_agent allows tmp" 'echo "$PROF_AGENT" | grep -q "allow file-read.*/tmp"'
+ok "sandbox_profile_agent denies network" 'echo "$PROF_AGENT" | grep -q "deny network"'
+ok "sandbox_profile_agent allows anthropic" 'echo "$PROF_AGENT" | grep -q "api.anthropic.com"'
+
+# 8r. ai_safety_check runs (read-only)
+$M ai safety >/dev/null
+ok "ai safety check runs" '[ $? = 0 ]'
+
+# 8s. ai_tuneup runs (read-only)
+$M ai tuneup >/dev/null
+ok "ai tuneup runs" '[ $? = 0 ]'
+
+# 8t. agents_export_jsonl produces valid jsonl
+EXPORT_OUT=$($M agents export --jsonl 2>&1)
+ok "agents export --jsonl runs" '[ $? = 0 ]'
+
+# 8u. vpn_status runs (no VPN client, just returns not found)
+VPN_OUT=$($M vpn status 2>&1)
+ok "vpn status runs" 'echo "$VPN_OUT" | grep -q "VPN\|client\|found"'
+
+# 8v. agent_level_costs returns dict
+$PY -c "import sys;sys.path.insert(0,'$SRC');import levplus;print(levplus.agent_level_costs())" | grep -q "Watch"
+ok "agent_level_costs returns dict" '[ $? = 0 ]'
+
+# 8w. parse_ps handles edge cases
+PARSE_OUT2=$($PY -c "import sys;sys.path.insert(0,'$SRC');import levplus;print(levplus.parse_ps(''))")
+ok "parse_ps empty input" '[ "$PARSE_OUT2" = "[]" ]'
+PARSE_OUT3=$($PY -c "import sys;sys.path.insert(0,'$SRC');import levplus;print(levplus.parse_ps('123 cmd\ninvalid'))")
+ok "parse_ps skips invalid" 'echo "$PARSE_OUT3" | grep -q "123"'
+
+# 8x. clip_check edge cases
+ok "clip_check empty strings" '[ -z "$(LEVIATHAN_CLIP_OLD="" $M clip <<<"" 2>&1)" ]'
+ok "clip_check whitespace only" '[ -z "$(LEVIATHAN_CLIP_OLD=" " $M clip <<<"  " 2>&1)" ]'
+
+# 8y. seed_phrase edge cases
+ok "seed_phrase empty" 'echo "" | $PY -c "import sys;sys.path.insert(0,\"$SRC\");import levplus;print(levplus.seed_phrase(sys.stdin.read()))" | grep -q False'
+ok "seed_phrase 24 words valid" 'echo "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about" | $PY -c "import sys;sys.path.insert(0,\"$SRC\");import levplus;print(levplus.seed_phrase(sys.stdin.read()))" | grep -q True'
+
 echo; echo "$pass passed, $fail failed"; rm -rf "$T"
