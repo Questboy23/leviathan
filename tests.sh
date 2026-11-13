@@ -228,4 +228,12 @@ ok "clip_check whitespace only" '[ -z "$(LEVIATHAN_CLIP_OLD=" " $M clip <<<"  " 
 ok "seed_phrase empty" 'echo "" | $PY -c "import sys;sys.path.insert(0,\"$SRC\");import levplus;print(levplus.seed_phrase(sys.stdin.read()))" | grep -q False'
 ok "seed_phrase 24 words valid" 'echo "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about" | $PY -c "import sys;sys.path.insert(0,\"$SRC\");import levplus;print(levplus.seed_phrase(sys.stdin.read()))" | grep -q True'
 
+# agent matching
+am() { $PY -c "import sys; sys.path.insert(0,\"$SRC\"); import levplus as P; print(bool(P._is_agent_process(sys.argv[1:])))" "$@"; }
+ok "agent: claude cli" "[ \"\$(am /Users/x/.local/bin/claude -p hi)\" = True ]"
+ok "agent: codex via node" "[ \"\$(am node /usr/local/bin/codex)\" = True ]"
+ok "agent: desktop claude code" "[ \"\$(am /Users/x/Lib/Claude/claude-code/2.1/x/claude.app/Contents/MacOS/claude)\" = True ]"
+ok "not agent: Claude desktop app" "[ \"\$(am /Applications/Claude.app/Contents/MacOS/Claude)\" = False ]"
+ok "not agent: zsh" "[ \"\$(am -zsh)\" = False ]"
+ok "not agent: vim cursor.txt" "[ \"\$(am vim cursor.txt)\" = False ]"
 echo; echo "$pass passed, $fail failed"; rm -rf "$T"

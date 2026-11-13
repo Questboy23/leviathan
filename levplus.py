@@ -474,7 +474,7 @@ def _is_agent_process(argv):
     exe = os.path.basename(argv[0]).lower()
 
     # Exclude .app/Contents/ paths (e.g., Claude desktop app)
-    if ".app/contents/" in argv[0].lower():
+    if ".app/contents/" in argv[0].lower() and "/claude-code/" not in argv[0].lower():
         return None
 
     # Exact matches for agent executables
