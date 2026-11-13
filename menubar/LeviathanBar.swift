@@ -13,11 +13,18 @@ final class LeviathanBar {
     let menu = NSMenu()
     var levelItems: [Int: NSMenuItem] = [:]
     var modeItems: [String: NSMenuItem] = [:]
+    var agentLevelItems: [Int: NSMenuItem] = [:]
     var pasteboardChangeCount: Int = NSPasteboard.general.changeCount
     var clipboardTimer: Timer?
     var passwordBoxTimer: Timer?
+    var vpnTimer: Timer?
+    var alertTimer: Timer?
     var level: Int = 2
     var modes: [String: Bool] = ["crypto": false, "apps": false, "tor": false, "agents": false]
+    var agentLevel: Int = 1
+    var vpnStatus: String = ""
+    var vpnClientFound: Bool = false
+    var hasUnreadAlert: Bool = false
     let leviathanBin: String
     let pythonBin = "/usr/bin/python3"
 
@@ -33,6 +40,7 @@ final class LeviathanBar {
         checkNotificationAuth()
         startClipboardMonitor()
         startPasswordBoxMonitor()
+        startVPNMonitor()
         refreshStatus()
     }
 
@@ -63,13 +71,26 @@ final class LeviathanBar {
         RunLoop.main.add(passwordBoxTimer!, forMode: .common)
     }
 
+    func startVPNMonitor() {
+        vpnTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
+            self?.fetchVPNStatus()
+        }
+        RunLoop.main.add(vpnTimer!, forMode: .common)
+    }
+
     @objc func statusItemClicked() {
+        if hasUnreadAlert {
+            hasUnreadAlert = false
+            updateIconColor()
+        }
         refreshStatus()
     }
 
     func refreshStatus() {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             self?.fetchLevelAndModes()
+            self?.fetchAgentLevel()
+            self?.fetchVPNStatus()
         }
     }
 
@@ -106,6 +127,38 @@ final class LeviathanBar {
         }
     }
 
+    func fetchAgentLevel() {
+        let result = runCLI(["agents", "level"], timeout: 10)
+        if let line = result.split(separator: "\n").first,
+           line.hasPrefix("Current agent level:") {
+            let parts = line.split(separator: ":")
+            if parts.count > 1, let lvl = Int(parts[1].trimmingCharacters(in: .whitespaces)) {
+                DispatchQueue.main.async { [weak self] in
+                    self?.agentLevel = lvl
+                    self?.updateAgentLevelChecks()
+                }
+            }
+        }
+    }
+
+    func fetchVPNStatus() {
+        let result = runCLI(["vpn", "status"], timeout: 10)
+        let status = result.trimmingCharacters(in: .whitespacesAndNewlines)
+        var clientFound = false
+
+        if status.hasPrefix("VPN:") || status.hasPrefix("Connected") || status.contains("on") {
+            clientFound = true
+        } else if status.contains("No supported VPN client found") {
+            clientFound = false
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            self?.vpnStatus = status
+            self?.vpnClientFound = clientFound
+            self?.updateVPNMenu()
+        }
+    }
+
     func updateMenu(installed: Bool) {
         menu.removeAllItems()
 
@@ -118,15 +171,33 @@ final class LeviathanBar {
             return
         }
 
-        let statusItem = NSMenuItem(title: "Level \(level) • \(modeSummary())", action: nil, keyEquivalent: "")
+        // Shield status line
+        let statusItem = NSMenuItem(title: "Leviathan • Level \(level) • \(modeSummary())", action: nil, keyEquivalent: "")
         statusItem.isEnabled = false
         menu.addItem(statusItem)
         menu.addItem(NSMenuItem.separator())
 
+        // Level 1-5 with checkmarks
         addLevelMenu()
         menu.addItem(NSMenuItem.separator())
-        addModeMenu()
+
+        // "I'm using:" with checkmarks
+        addUsingMenu()
         menu.addItem(NSMenuItem.separator())
+
+        // AI Safety card
+        addAISafetyMenu()
+        menu.addItem(NSMenuItem.separator())
+
+        // AI Tune-up card
+        addAITuneupMenu()
+        menu.addItem(NSMenuItem.separator())
+
+        // VPN
+        addVPNMenu()
+        menu.addItem(NSMenuItem.separator())
+
+        // Actions
         addActionMenu()
         menu.addItem(NSMenuItem.separator())
         addQuitItem()
@@ -173,7 +244,7 @@ final class LeviathanBar {
         }
     }
 
-    func addModeMenu() {
+    func addUsingMenu() {
         let modeOrder = [("crypto", "Crypto"), ("apps", "Untrusted apps"), ("tor", "Tor"), ("agents", "AI agents")]
         let submenu = NSMenu()
         for (key, label) in modeOrder {
@@ -184,7 +255,7 @@ final class LeviathanBar {
             submenu.addItem(item)
             modeItems[key] = item
         }
-        let parent = NSMenuItem(title: "Modes", action: nil, keyEquivalent: "")
+        let parent = NSMenuItem(title: "I'm using:", action: nil, keyEquivalent: "")
         menu.setSubmenu(submenu, for: parent)
         menu.addItem(parent)
     }
@@ -201,15 +272,169 @@ final class LeviathanBar {
         }
     }
 
-    func addActionMenu() {
+    func addAISafetyMenu() {
+        let submenu = NSMenu()
+
+        // Agent level submenu
+        let levelSubmenu = NSMenu()
+        for lvl in 1...3 {
+            let item = NSMenuItem(title: "Level \(lvl): \(agentLevelName(lvl))", action: #selector(setAgentLevel(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = lvl
+            item.state = lvl == agentLevel ? .on : .off
+            levelSubmenu.addItem(item)
+            agentLevelItems[lvl] = item
+        }
+        let levelParent = NSMenuItem(title: "Agent guard level", action: nil, keyEquivalent: "")
+        submenu.setSubmenu(levelSubmenu, for: levelParent)
+        submenu.addItem(levelParent)
+
+        submenu.addItem(NSMenuItem.separator())
+
         let pauseItem = NSMenuItem(title: "Pause all AI agents", action: #selector(pauseAgents), keyEquivalent: "")
         pauseItem.target = self
-        menu.addItem(pauseItem)
+        submenu.addItem(pauseItem)
 
         let resumeItem = NSMenuItem(title: "Resume all AI agents", action: #selector(resumeAgents), keyEquivalent: "")
         resumeItem.target = self
-        menu.addItem(resumeItem)
+        submenu.addItem(resumeItem)
 
+        let parent = NSMenuItem(title: "AI Safety", action: nil, keyEquivalent: "")
+        menu.setSubmenu(submenu, for: parent)
+        menu.addItem(parent)
+    }
+
+    func agentLevelName(_ lvl: Int) -> String {
+        switch lvl {
+        case 1: return "Watch"
+        case 2: return "Guard"
+        case 3: return "Lockdown"
+        default: return ""
+        }
+    }
+
+    func updateAgentLevelChecks() {
+        for lvl in 1...3 {
+            agentLevelItems[lvl]?.state = lvl == agentLevel ? .on : .off
+        }
+    }
+
+    @objc func setAgentLevel(_ sender: NSMenuItem) {
+        runCLIAsync(["agents", "level", "\(sender.tag)"]) { [weak self] output in
+            if output.contains("error") || output.contains("Error") {
+                self?.showAlert("Failed to set agent level", output)
+            } else {
+                self?.fetchAgentLevel()
+            }
+        }
+    }
+
+    @objc func pauseAgents() {
+        runCLIAsync(["agents", "pause"]) { [weak self] output in
+            self?.showResult("Pause agents", output)
+        }
+    }
+
+    @objc func resumeAgents() {
+        runCLIAsync(["agents", "resume"]) { [weak self] output in
+            self?.showResult("Resume agents", output)
+        }
+    }
+
+    func addAITuneupMenu() {
+        let submenu = NSMenu()
+
+        let runItem = NSMenuItem(title: "Run check", action: #selector(runAITuneup), keyEquivalent: "")
+        runItem.target = self
+        submenu.addItem(runItem)
+
+        let parent = NSMenuItem(title: "AI Tune-up", action: nil, keyEquivalent: "")
+        menu.setSubmenu(submenu, for: parent)
+        menu.addItem(parent)
+    }
+
+    @objc func runAITuneup() {
+        runCLIAsync(["ai", "tuneup"]) { [weak self] output in
+            self?.showResult("AI Tune-up", output)
+        }
+    }
+
+    func addVPNMenu() {
+        let submenu = NSMenu()
+
+        if vpnClientFound {
+            let statusItem = NSMenuItem(title: vpnStatus, action: nil, keyEquivalent: "")
+            statusItem.isEnabled = false
+            submenu.addItem(statusItem)
+            submenu.addItem(NSMenuItem.separator())
+
+            let onItem = NSMenuItem(title: "VPN on", action: #selector(vpnOn), keyEquivalent: "")
+            onItem.target = self
+            submenu.addItem(onItem)
+
+            let offItem = NSMenuItem(title: "VPN off", action: #selector(vpnOff), keyEquivalent: "")
+            offItem.target = self
+            submenu.addItem(offItem)
+        } else {
+            let item = NSMenuItem(title: "Get free VPN (Cloudflare WARP)", action: #selector(openWARP), keyEquivalent: "")
+            item.target = self
+            submenu.addItem(item)
+        }
+
+        let parent = NSMenuItem(title: "VPN", action: nil, keyEquivalent: "")
+        menu.setSubmenu(submenu, for: parent)
+        menu.addItem(parent)
+    }
+
+    func updateVPNMenu() {
+        // Find the VPN parent item and update its submenu
+        for item in menu.items {
+            if item.title == "VPN", let submenu = item.submenu {
+                submenu.removeAllItems()
+                if vpnClientFound {
+                    let statusItem = NSMenuItem(title: vpnStatus, action: nil, keyEquivalent: "")
+                    statusItem.isEnabled = false
+                    submenu.addItem(statusItem)
+                    submenu.addItem(NSMenuItem.separator())
+
+                    let onItem = NSMenuItem(title: "VPN on", action: #selector(vpnOn), keyEquivalent: "")
+                    onItem.target = self
+                    submenu.addItem(onItem)
+
+                    let offItem = NSMenuItem(title: "VPN off", action: #selector(vpnOff), keyEquivalent: "")
+                    offItem.target = self
+                    submenu.addItem(offItem)
+                } else {
+                    let item = NSMenuItem(title: "Get free VPN (Cloudflare WARP)", action: #selector(openWARP), keyEquivalent: "")
+                    item.target = self
+                    submenu.addItem(item)
+                }
+                break
+            }
+        }
+    }
+
+    @objc func vpnOn() {
+        runCLIAsync(["vpn", "on"]) { [weak self] output in
+            self?.showResult("VPN on", output)
+            self?.fetchVPNStatus()
+        }
+    }
+
+    @objc func vpnOff() {
+        runCLIAsync(["vpn", "off"]) { [weak self] output in
+            self?.showResult("VPN off", output)
+            self?.fetchVPNStatus()
+        }
+    }
+
+    @objc func openWARP() {
+        if let url = URL(string: "https://one.one.one.one") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    func addActionMenu() {
         let sandboxItem = NSMenuItem(title: "Open app in sandbox…", action: #selector(openInSandbox), keyEquivalent: "")
         sandboxItem.target = self
         menu.addItem(sandboxItem)
@@ -225,18 +450,6 @@ final class LeviathanBar {
         let scanItem = NSMenuItem(title: "Run full scan", action: #selector(runFullScan), keyEquivalent: "")
         scanItem.target = self
         menu.addItem(scanItem)
-    }
-
-    @objc func pauseAgents() {
-        runCLIAsync(["agents", "pause"]) { [weak self] output in
-            self?.showResult("Pause agents", output)
-        }
-    }
-
-    @objc func resumeAgents() {
-        runCLIAsync(["agents", "resume"]) { [weak self] output in
-            self?.showResult("Resume agents", output)
-        }
     }
 
     @objc func openInSandbox() {
@@ -269,7 +482,9 @@ final class LeviathanBar {
 
     @objc func showRecentActivity() {
         let result = runCLI(["status"], timeout: 10)
-        showAlert("Recent Activity (last 30 entries)", result)
+        // Show last 10 lines
+        let lines = result.split(separator: "\n").suffix(10).joined(separator: "\n")
+        showAlert("Recent Activity (last 10 entries)", lines)
     }
 
     @objc func runFullScan() {
@@ -291,6 +506,8 @@ final class LeviathanBar {
                 let limited = String(string.prefix(10240))
                 runCLIAsync(["clip"], stdin: limited) { [weak self] output in
                     if !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        self?.hasUnreadAlert = true
+                        self?.updateIconColor()
                         self?.showWarning("Clipboard guard", output)
                     }
                 }
@@ -312,6 +529,8 @@ final class LeviathanBar {
                 if !isParentTerminal(ppid: ppid) {
                     _ = runCLI(["kill", "-9", pid], timeout: 2)
                     _ = runCLI(["note-event", "password-box", pid], timeout: 2)
+                    hasUnreadAlert = true
+                    updateIconColor()
                     showWarning("Fake password box blocked", "Terminated osascript PID \(pid)")
                 }
             }
@@ -330,6 +549,17 @@ final class LeviathanBar {
         UNUserNotificationCenter.current().getNotificationSettings { settings in
             DispatchQueue.main.async {
                 self.notificationAuthorized = settings.authorizationStatus == .authorized
+            }
+        }
+    }
+
+    func updateIconColor() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, let button = self.statusItem.button else { return }
+            if self.hasUnreadAlert {
+                button.contentTintColor = .systemOrange
+            } else {
+                button.contentTintColor = nil
             }
         }
     }
