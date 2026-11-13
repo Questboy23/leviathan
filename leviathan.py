@@ -970,6 +970,11 @@ def main():
             print(LP.ai_tuneup(fix=fix))
         else:
             print("Usage: leviathan ai <safety|tuneup [--fix]>")
+    elif c == "tor":
+        print(LP.tor_check() if LP else "levplus not available")
+    elif c == "wallets":
+        r = LP.wallet_apps() if LP else "levplus not available"
+        print("\n".join(map(str, r)) if isinstance(r, list) else r)
     elif c == "vpn":
         if not LP:
             print("levplus not available")
