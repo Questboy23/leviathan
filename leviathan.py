@@ -895,7 +895,7 @@ def main():
             with open(profile_path, "w") as f:
                 f.write(profile)
             os.makedirs(os.path.join(home, "Library/Application Support/Leviathan/sandbox", container), exist_ok=True)
-            L.run(["sandbox-exec", "-f", profile_path, exe])
+            subprocess.Popen(["sandbox-exec", "-f", profile_path, exe])
     elif c == "pkg" and len(a) > 1:
         if LP:
             print(LP.pkg_inspect(a[1]))
