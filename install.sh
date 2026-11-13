@@ -88,11 +88,13 @@ else
     echo "swiftc not found; skipping menu bar app build."
 fi
 
+if [ -z "$LEVIATHAN_SKIP_ROOT" ]; then
 echo; echo "Your Mac password is needed once to turn on the site filter and safe settings."
 sudo bash "$SRC/install-root.sh" "$HOME" "$P"
+else echo "Skipping system part (LEVIATHAN_SKIP_ROOT set)."; fi
 echo; echo "Settings check:"
 "$PY" "$S/bin/leviathan.py" sweep --fix
-sudo "/Library/Application Support/Leviathan/leviathan-root" sweep --fix
+[ -z "$LEVIATHAN_SKIP_ROOT" ] && sudo "/Library/Application Support/Leviathan/leviathan-root" sweep --fix
 echo; echo "Leviathan is on. It stays quiet unless it removes something or you do something risky."
 echo "Open a new Terminal window, then:"
 echo "  leviathan scan       check everything now"
