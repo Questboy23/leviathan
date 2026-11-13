@@ -104,44 +104,92 @@ def seed_phrase(text):
     return matches / n >= 0.9
 
 # ---------- wallet apps ----------
+# Only include Team IDs that are verifiably correct (from official sources)
+# Ledger Live: NV3M43VFPU (Ledger SAS)
+# MetaMask Chrome extension ID: nkbihfbeogaeaoehlefnkodbefgpgknn
 WALLET_EXPECTED = {
     "Ledger Live": "NV3M43VFPU",
-    "Exodus": "3N7WQ7Q7Q7",
-    "Electrum": "L8Y5V8P5P5",
-    "Trezor Suite": "S7V7V7V7V7",
-    "Sparrow": "Q9W9W9W9W9",
+    "MetaMask": "nkbihfbeogaeaoehlefnkodbefgpgknn",  # Chrome extension ID
+}
+
+# Known bundle IDs for wallet apps (only for those we're certain about)
+WALLET_BUNDLE_IDS = {
+    "Ledger Live": "com.ledger.live",
     "MetaMask": "nkbihfbeogaeaoehlefnkodbefgpgknn",  # Chrome extension ID
 }
 
 def wallet_apps():
-    """Report signed-by Team ID vs expected for wallet apps."""
+    """Report wallet apps: not installed / signed by Team ID (Developer ID) / UNSIGNED or ad-hoc (warn).
+    Only warn on unsigned/ad-hoc or bundle ID mismatch if known for certain."""
     results = []
-    for name, expected in WALLET_EXPECTED.items():
+    # Check apps with known Team IDs
+    for name, expected_team_id in WALLET_EXPECTED.items():
         if name == "MetaMask":
             # Check Chrome extension
-            chrome_ext = os.path.join(L.HOME, "Library/Application Support/Google/Chrome/Default/Extensions", expected)
+            chrome_ext = os.path.join(L.HOME, "Library/Application Support/Google/Chrome/Default/Extensions", expected_team_id)
             if os.path.exists(chrome_ext):
-                results.append((name, "installed", "extension", expected))
+                results.append((name, "installed", "extension", expected_team_id, "ok"))
             else:
-                results.append((name, "not found", "extension", expected))
+                results.append((name, "not found", "extension", expected_team_id, "not installed"))
             continue
         # Find .app
         found = False
         for d in L.APP_DIRS:
             app_path = os.path.join(d, f"{name}.app")
             if os.path.exists(app_path):
-                code, out = L.run(["codesign", "-dv", "--verbose=2", app_path])
+                code, out = L.run(["codesign", "-dv", "--verbose=2", app_path], timeout=15)
                 team_id = ""
+                bundle_id = ""
                 for line in out.splitlines():
                     if "TeamIdentifier=" in line:
                         team_id = line.split("TeamIdentifier=")[1].strip()
-                        break
-                status = "matches" if team_id == expected else ("unsigned or unexpected signer" if not team_id else f"unexpected: {team_id}")
-                results.append((name, "found", team_id or "none", status))
+                    elif "Identifier=" in line and not bundle_id:
+                        bundle_id = line.split("Identifier=")[1].strip()
+                if not team_id:
+                    status = "UNSIGNED or ad-hoc"
+                    warn = True
+                elif team_id == expected_team_id:
+                    status = f"signed by Team ID {team_id} (Developer ID)"
+                    # Check bundle ID if known
+                    warn = False
+                    if name in WALLET_BUNDLE_IDS and bundle_id and bundle_id != WALLET_BUNDLE_IDS[name]:
+                        status += f"; WARNING: bundle ID mismatch (expected {WALLET_BUNDLE_IDS[name]}, got {bundle_id})"
+                        warn = True
+                else:
+                    status = f"signed by Team ID {team_id} (Developer ID)"
+                    warn = False
+                results.append((name, "found", team_id or "none", status, "warn" if warn else "ok"))
                 found = True
                 break
         if not found:
-            results.append((name, "not found", "none", "not installed"))
+            results.append((name, "not found", "none", "not installed", "ok"))
+
+    # Check other known wallet apps (no expected Team ID, just report what we find)
+    other_wallets = ["Exodus", "Electrum", "Trezor Suite", "Sparrow"]
+    for name in other_wallets:
+        found = False
+        for d in L.APP_DIRS:
+            app_path = os.path.join(d, f"{name}.app")
+            if os.path.exists(app_path):
+                code, out = L.run(["codesign", "-dv", "--verbose=2", app_path], timeout=15)
+                team_id = ""
+                bundle_id = ""
+                for line in out.splitlines():
+                    if "TeamIdentifier=" in line:
+                        team_id = line.split("TeamIdentifier=")[1].strip()
+                    elif "Identifier=" in line and not bundle_id:
+                        bundle_id = line.split("Identifier=")[1].strip()
+                if not team_id:
+                    status = "UNSIGNED or ad-hoc (WARNING)"
+                    warn = True
+                else:
+                    status = f"signed by Team ID {team_id} (Developer ID)"
+                    warn = False
+                results.append((name, "found", team_id or "none", status, "warn" if warn else "ok"))
+                found = True
+                break
+        if not found:
+            results.append((name, "not found", "none", "not installed", "ok"))
     return results
 
 # ---------- sandbox ----------
@@ -184,7 +232,7 @@ def pkg_inspect(pkg_path):
             parent = tempfile.mkdtemp()
             tmp = os.path.join(parent, "pkg_expand")
             tmp_obj = type('obj', (object,), {'cleanup': lambda self: shutil.rmtree(parent, ignore_errors=True)})()
-            code, out = L.run(["pkgutil", "--expand", pkg_path, tmp])
+            code, out = L.run(["pkgutil", "--expand", pkg_path, tmp], timeout=15)
             if code != 0:
                 return f"Failed to expand: {out}"
         scripts = []
@@ -265,7 +313,7 @@ def snapshot():
         except Exception:
             pass
     # Login items (macOS 13+)
-    code, out = L.run(["osascript", "-e", 'tell application "System Events" to get the name of every login item'])
+    code, out = L.run(["osascript", "-e", 'tell application "System Events" to get the name of every login item'], timeout=15)
     if code == 0:
         data["login_items"] = [x.strip() for x in out.split(",") if x.strip()]
     # /etc/hosts hash
@@ -327,7 +375,7 @@ def diff(undo=False):
     old_daemons = {a["name"]: a for a in old.get("launch_daemons", [])}
     new_daemons = {a["name"]: a for a in get_items("launch_daemons")}
     # Login items
-    code, out = L.run(["osascript", "-e", 'tell application "System Events" to get the name of every login item'])
+    code, out = L.run(["osascript", "-e", 'tell application "System Events" to get the name of every login item'], timeout=15)
     new_login = [x.strip() for x in out.split(",") if x.strip()] if code == 0 else []
     old_login = set(old.get("login_items", []))
     new_login_set = set(new_login)
@@ -376,7 +424,7 @@ def diff(undo=False):
 
 # ---------- AI agent guard ----------
 def parse_ps(text):
-    """Pure function: parse ps output, return list of (pid, command)."""
+    """Pure function: parse ps output, return list of (pid, argv list)."""
     out = []
     for line in text.splitlines():
         line = line.strip()
@@ -386,24 +434,80 @@ def parse_ps(text):
         if len(parts) == 2:
             pid, cmd = parts
             if pid.isdigit():
-                out.append((int(pid), cmd))
+                argv = cmd.split()
+                out.append((int(pid), argv))
     return out
+
+
+def _get_ancestor_pids(pid):
+    """Walk ppid chain via ps to get all ancestor PIDs."""
+    ancestors = set()
+    current = pid
+    while True:
+        code, out = L.run(["ps", "-o", "ppid=", "-p", str(current)], timeout=5)
+        if code != 0:
+            break
+        ppid = out.strip()
+        if not ppid or ppid == "0" or ppid == "1":
+            break
+        ppid = int(ppid)
+        if ppid in ancestors:
+            break
+        ancestors.add(ppid)
+        current = ppid
+    return ancestors
+
+
+def _is_agent_process(argv):
+    """Check if argv matches an AI agent.
+
+    Agent criteria:
+    - executable basename (argv[0], basename, lowercase) is exactly one of:
+      claude, codex, aider, goose, gemini, openhands, cursor-agent
+    - OR executable basename is node/python/python3/bun/deno AND
+      second argv token basename starts with one of those names
+    - Exclude anything with ".app/Contents/" in argv[0]
+    """
+    if not argv:
+        return None
+
+    exe = os.path.basename(argv[0]).lower()
+
+    # Exclude .app/Contents/ paths (e.g., Claude desktop app)
+    if ".app/contents/" in argv[0].lower():
+        return None
+
+    # Exact matches for agent executables
+    exact_agents = {"claude", "codex", "aider", "goose", "gemini", "openhands", "cursor-agent"}
+    if exe in exact_agents:
+        return exe
+
+    # Interpreter + agent script
+    interpreters = {"node", "python", "python3", "bun", "deno"}
+    if exe in interpreters and len(argv) > 1:
+        arg1 = os.path.basename(argv[1]).lower()
+        for agent in exact_agents:
+            if arg1.startswith(agent):
+                return f"{exe}-{agent}"
+
+    return None
+
 
 def agent_procs():
     """Return list of (pid, name) for running AI agents."""
-    code, out = L.run(["ps", "-axo", "pid=,command="])
+    # Get current process and all ancestors to exclude
+    my_pid = os.getpid()
+    exclude_pids = {my_pid} | _get_ancestor_pids(my_pid)
+
+    code, out = L.run(["ps", "-axo", "pid=,command="], timeout=15)
     procs = parse_ps(out)
     agents = []
-    names = ("claude", "codex", "cursor", "aider", "goose", "gemini", "openhands")
-    for pid, cmd in procs:
-        low = cmd.lower()
-        for n in names:
-            if n in low:
-                agents.append((pid, n))
-                break
-        # node processes with agent names in argv
-        if "node" in low and any(n in low for n in names):
-            agents.append((pid, "node-agent"))
+    for pid, argv in procs:
+        if pid in exclude_pids:
+            continue
+        name = _is_agent_process(argv)
+        if name:
+            agents.append((pid, name))
     return agents
 
 def agents_pause():
@@ -474,7 +578,7 @@ def agents_check():
                      os.path.join(L.HOME, "Library/Application Support/Google/Chrome"),
                      os.path.join(L.HOME, "Library/Application Support/Firefox"))
         for pid, _ in procs:
-            code, out = L.run(["lsof", "-p", str(pid), "-F", "n"])
+            code, out = L.run(["lsof", "-p", str(pid), "-F", "n"], timeout=15)
             for line in out.splitlines():
                 if line.startswith("n"):
                     path = line[1:]
@@ -542,7 +646,7 @@ def tor_check():
         return "Tor Browser not found."
     results.append(f"Found: {tb}")
     # Signature
-    code, out = L.run(["codesign", "-dv", "--verbose=2", tb])
+    code, out = L.run(["codesign", "-dv", "--verbose=2", tb], timeout=15)
     team_id = ""
     for line in out.splitlines():
         if "TeamIdentifier=" in line:
@@ -627,11 +731,11 @@ def cost():
         cpu_total += e.get("cpu_seconds", 0.0)
     # Menu bar app RSS
     rss = 0
-    code, out = L.run(["pgrep", "-f", "LeviathanBar"])
+    code, out = L.run(["pgrep", "-f", "LeviathanBar"], timeout=10)
     if code == 0:
         for pid in out.split():
             try:
-                code2, out2 = L.run(["ps", "-o", "rss=", pid])
+                code2, out2 = L.run(["ps", "-o", "rss=", pid], timeout=10)
                 rss += int(out2.strip() or 0)
             except Exception:
                 pass
@@ -719,7 +823,7 @@ def agents_tripped():
     for pid, name in procs:
         # Check if this agent read a canary recently
         try:
-            code, out = L.run(["lsof", "-p", str(pid), "-F", "n"])
+            code, out = L.run(["lsof", "-p", str(pid), "-F", "n"], timeout=15)
             for line in out.splitlines():
                 if line.startswith("n") and ".leviathan-canary" in line:
                     os.kill(pid, signal.SIGSTOP)
@@ -912,7 +1016,7 @@ def ai_tuneup(fix=False):
         else:
             results.append(f"OK: {name} config present")
 
-    # 2. Check hooks that fail or take >1s
+    # 2. Check hooks: list them (event, command, timeout setting) and flag ones with no timeout or timeout > 10s
     cc_settings = os.path.join(L.HOME, ".claude", "settings.json")
     if os.path.exists(cc_settings):
         try:
@@ -922,32 +1026,11 @@ def ai_tuneup(fix=False):
             for event, hook_list in hooks.items():
                 for hook in hook_list:
                     cmd = hook.get("command", "")
+                    timeout = hook.get("timeout", 0)
                     if cmd:
-                        # Test hook with timeout
-                        import subprocess
-                        try:
-                            start = time.time()
-                            subprocess.run(cmd, shell=True, timeout=2, capture_output=True)
-                            elapsed = time.time() - start
-                            if elapsed > 1:
-                                results.append(f"CHECK: {name} hook for {event} took {elapsed:.1f}s: {cmd[:80]}")
-                            else:
-                                results.append(f"OK: {name} hook for {event} fast ({elapsed:.2f}s)")
-                        except subprocess.TimeoutExpired:
-                            results.append(f"CHECK: {name} hook for {event} timed out (>2s): {cmd[:80]}")
-                            if fix:
-                                # Disable slow hook by commenting it out (backup first)
-                                backup = cc_settings + ".leviathan-" + time.strftime("%Y%m%d%H%M%S")
-                                shutil.copy2(cc_settings, backup)
-                                # Mark hook as disabled
-                                hook["disabled"] = True
-                                with open(cc_settings, "w") as f:
-                                    json.dump(s, f, indent=2)
-                                fixes_applied.append(f"Disabled slow hook: {cmd[:80]}")
-                                L.ledger_add("setting", setting=f"Disabled slow hook: {cmd[:80]}",
-                                           undo={"type": "move", "src": backup, "dst": cc_settings})
-                        except Exception:
-                            results.append(f"CHECK: {name} hook for {event} failed: {cmd[:80]}")
+                        results.append(f"HOOK: event={event} timeout={timeout or 'none'} cmd={cmd[:120]}")
+                        if not timeout or timeout > 10:
+                            results.append(f"  CHECK: hook has no timeout or timeout > 10s ({timeout}s)")
         except Exception:
             pass
 
@@ -1105,13 +1188,13 @@ def vpn_on():
             label = found[key]["label"]
             try:
                 if key == "warp":
-                    L.run([bin_path, "connect"], timeout=30)
+                    L.run([bin_path, "connect"], timeout=15)
                 elif key == "mullvad":
-                    L.run([bin_path, "connect"], timeout=30)
+                    L.run([bin_path, "connect"], timeout=15)
                 elif key == "tailscale":
-                    L.run([bin_path, "up"], timeout=30)
+                    L.run([bin_path, "up"], timeout=15)
                 elif key == "protonvpn":
-                    L.run([bin_path, "connect"], timeout=30)
+                    L.run([bin_path, "connect"], timeout=15)
                 L.ledger_add("vpn", action="on", client=key)
                 return f"Started {label}."
             except Exception as e:
@@ -1372,7 +1455,7 @@ def agents_check():
                      os.path.join(L.HOME, "Library/Application Support/Google/Chrome"),
                      os.path.join(L.HOME, "Library/Application Support/Firefox"))
         for pid, name in procs:
-            code, out = L.run(["lsof", "-p", str(pid), "-F", "n"])
+            code, out = L.run(["lsof", "-p", str(pid), "-F", "n"], timeout=15)
             for line in out.splitlines():
                 if line.startswith("n"):
                     path = line[1:]

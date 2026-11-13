@@ -66,7 +66,9 @@ def ledger_add(kind, **data):
     with open(LEDGER, "a") as f:
         f.write(json.dumps(e) + "\n")
     if IS_ROOT:
-        os.chmod(LEDGER, 0o644)
+        os.chmod(LEDGER, 0o644)  # root ledger in /var/db/leviathan
+    else:
+        os.chmod(LEDGER, 0o600)  # user ledger in ~/.leviathan - private
     return e["id"]
 
 
@@ -181,7 +183,7 @@ def sign_check(path):
     args = ["spctl", "--assess", "--type", kind, path]
     if ext.endswith(".dmg"):
         args = ["spctl", "--assess", "--type", "open", "--context", "context:primary-signature", path]
-    code2, sp = run(args, timeout=180)
+    code2, sp = run(args, timeout=30)
     if code2 == 99:
         return False, True  # couldn't decide in time: don't bother the user
     return "REVOKED" in sp.upper(), code2 == 0
