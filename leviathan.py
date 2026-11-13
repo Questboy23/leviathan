@@ -2,7 +2,7 @@
 """Leviathan: stops viruses before they run on a Mac. Every action is logged and undoable.
 Commands: scan | scan-downloads | scan-apps | scan-persist | sweep [--fix] | check-cmd CMD |
           pwwatch | undo ID | undo-settings | status | verify | contain PATH | fix-chrome-notify"""
-import datetime, hashlib, json, os, plistlib, re, shutil, subprocess, sys, time
+import datetime, hashlib, json, os, plistlib, re, shutil, subprocess, sys, time, signal
 
 os.umask(0o077)  # the log and quarantine are readable by you only
 HOME = os.path.expanduser("~")
@@ -758,6 +758,185 @@ def main():
     else:
         status()
 
+
+# Import levplus for new commands
+try:
+    import levplus as LP
+except Exception:
+    LP = None
+
+def main():
+    a = sys.argv[1:] or ["status"]
+    c = a[0]
+    if c == "scan-downloads":
+        scan_dir(DOWNLOADS, "downloads")
+    elif c == "scan-apps":
+        scan_dir("/Applications", "apps", only_apps=True)
+    elif c == "scan-persist":
+        scan_persist()
+    elif c == "scan-all":
+        scan_dir(DOWNLOADS, "downloads"); scan_dir("/Applications", "apps", only_apps=True); scan_persist()
+    elif c == "sweep":
+        fix = "--fix" in a
+        res = sweep_system(fix) if os.geteuid() == 0 else sweep_user(fix)
+        if "--quiet" not in a:
+            print_sweep(res)
+    elif c == "check-cmd":
+        msg = check_cmd(" ".join(a[1:]))
+        if msg:
+            print(msg)
+            ledger_add("paste-stopped", detail=" ".join(a[1:])[:300], reason=msg)
+            start_pwwatch()
+    elif c == "contain" and len(a) > 1:
+        contain(a[1], "removed by you")
+    elif c == "pwwatch":
+        pwwatch()
+    elif c == "undo" and len(a) > 1:
+        if a[1].upper().startswith("S") and not IS_ROOT:
+            print(f"System change. Run: sudo \"{ROOT_TOOL}\" undo {a[1][1:]}")
+        else:
+            undo(a[1].lstrip("Ss"))
+    elif c == "undo-settings":
+        undo_settings()
+    elif c == "scan":
+        sys.exit(1 if full_scan() else 0)
+    elif c == "verify":
+        sys.exit(0 if verify() else 1)
+    elif c == "fix-chrome-notify":
+        fix_chrome_notify()
+    # ---- Leviathan 2.0 commands ----
+    elif c == "level":
+        if len(a) == 1:
+            lvl = LP.get_level() if LP else 2
+            print(f"Current level: {lvl}")
+            print("Levels:")
+            print("  1 Basic: 1.0 behaviour")
+            print("  2 Standard (default): + crypto clipboard guard, recovery-phrase guard, fake password box guard")
+            print("  3 Careful: + instant startup-item alert, wallet app signature check daily")
+            print("  4 Strict: + new unsigned/ad-hoc apps from internet open in sandbox; Tor checks")
+            print("  5 Lockdown: + new unsigned apps contained until approval; outbound internet alert for new apps (lsof sample every 60s)")
+            print("Costs: more prompts, some apps break, sandboxed apps cannot see your files")
+        elif a[1] == "--json":
+            lvl = LP.get_level() if LP else 2
+            print(json.dumps({"level": lvl}))
+        else:
+            try:
+                n = int(a[1])
+                LP.set_level(n) if LP else None
+                print(f"Level set to {n}")
+            except Exception:
+                print("Usage: leviathan level [1-5]")
+    elif c == "mode":
+        if len(a) == 1:
+            modes = LP.get_modes() if LP else {"crypto": False, "apps": False, "tor": False, "agents": False}
+            for k, v in modes.items():
+                print(f"  {k}: {'on' if v else 'off'}")
+        elif a[1] == "--json":
+            modes = LP.get_modes() if LP else {"crypto": False, "apps": False, "tor": False, "agents": False}
+            print(json.dumps(modes))
+        elif len(a) >= 3:
+            name, val = a[1], a[2]
+            if name in ("crypto", "apps", "tor", "agents") and val in ("on", "off"):
+                LP.set_mode(name, val == "on") if LP else None
+                print(f"Mode {name} = {val}")
+            else:
+                print("Usage: leviathan mode <crypto|apps|tor|agents> <on|off>")
+        else:
+            print("Usage: leviathan mode [crypto|apps|tor|agents] [on|off]")
+    elif c == "clip":
+        if not LP:
+            print("levplus not available")
+        else:
+            data = sys.stdin.read()
+            old = os.environ.get("LEVIATHAN_CLIP_OLD", "")
+            warn = LP.clip_check(old, data.strip())
+            if warn:
+                print(warn)
+                LP.ledger_add("clip-warning", detail=warn)
+            if LP.seed_phrase(data):
+                warn2 = "Clipboard contains a possible recovery phrase (seed phrase)."
+                print(warn2)
+                LP.ledger_add("clip-warning", detail=warn2)
+    elif c == "cost":
+        if LP:
+            print(LP.cost())
+        else:
+            print("levplus not available")
+    elif c == "note-event" and len(a) >= 3:
+        if LP:
+            print(LP.note_event(a[1], " ".join(a[2:])))
+        else:
+            print("levplus not available")
+    elif c == "sandbox" and len(a) > 1:
+        if not LP:
+            print("levplus not available")
+        else:
+            app = a[1]
+            net = "--net" in a
+            # Find the main executable
+            if app.endswith(".app") and os.path.isdir(app):
+                exe = os.path.join(app, "Contents/MacOS")
+                # find the actual binary
+                try:
+                    for f in os.listdir(exe):
+                        p = os.path.join(exe, f)
+                        if os.path.isfile(p) and os.access(p, os.X_OK):
+                            exe = p
+                            break
+                except Exception:
+                    pass
+            else:
+                exe = app
+            container = os.path.basename(app).replace(".app", "").replace(" ", "_")
+            home = os.path.expanduser("~")
+            profile = LP.sandbox_profile(home, container, net)
+            profile_path = os.path.join(home, "Library/Application Support/Leviathan/sandbox", container, "profile.sb")
+            os.makedirs(os.path.dirname(profile_path), exist_ok=True)
+            with open(profile_path, "w") as f:
+                f.write(profile)
+            os.makedirs(os.path.join(home, "Library/Application Support/Leviathan/sandbox", container), exist_ok=True)
+            L.run(["sandbox-exec", "-f", profile_path, exe])
+    elif c == "pkg" and len(a) > 1:
+        if LP:
+            print(LP.pkg_inspect(a[1]))
+        else:
+            print("levplus not available")
+    elif c == "snapshot":
+        if LP:
+            print(LP.snapshot())
+        else:
+            print("levplus not available")
+    elif c == "diff":
+        if LP:
+            do_undo = "--undo" in a
+            print(LP.diff(undo=do_undo))
+        else:
+            print("levplus not available")
+    elif c == "agents":
+        if not LP:
+            print("levplus not available")
+        elif len(a) > 1 and a[1] in ("pause", "resume"):
+            print(LP.agents_pause() if a[1] == "pause" else LP.agents_resume())
+        elif len(a) > 1 and a[1] == "canary":
+            if len(a) > 2 and a[2] == "on":
+                print(LP.agents_canary_on())
+            else:
+                print(LP.agents_check())
+        elif len(a) > 1 and a[1] == "config":
+            print(LP.agents_config_audit())
+        else:
+            procs = LP.agent_procs() if LP else []
+            for pid, name in procs:
+                print(f"  {pid}  {name}")
+            if not procs:
+                print("No AI agent processes found.")
+    elif c == "tor":
+        if LP:
+            print(LP.tor_check())
+        else:
+            print("levplus not available")
+    else:
+        status()
 
 if __name__ == "__main__":
     main()
