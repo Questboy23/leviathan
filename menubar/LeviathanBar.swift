@@ -6,7 +6,7 @@ import UniformTypeIdentifiers
 // Leviathan Bar - Menu bar app for Leviathan security tool
 // Build: swiftc -O -framework AppKit LeviathanBar.swift -o build/Leviathan\ Bar.app/Contents/MacOS/Leviathan\ Bar
 
-final class LeviathanBar {
+final class LeviathanBar: NSObject, NSMenuDelegate {
     static let shared = LeviathanBar()
 
     let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -28,13 +28,14 @@ final class LeviathanBar {
     let leviathanBin: String
     let pythonBin = "/usr/bin/python3"
 
-    private init() {
+    private override init() {
         if let envBin = ProcessInfo.processInfo.environment["LEVIATHAN_BIN"], !envBin.isEmpty {
             leviathanBin = envBin
         } else {
             let home = FileManager.default.homeDirectoryForCurrentUser.path
             leviathanBin = "\(home)/.leviathan/bin/leviathan.py"
         }
+        super.init()
         setupUI()
         requestNotificationAuth()
         checkNotificationAuth()
@@ -51,6 +52,11 @@ final class LeviathanBar {
             button.action = #selector(statusItemClicked)
         }
         statusItem.menu = menu
+        menu.delegate = self  // the button action never fires once a menu is attached; opening the menu clears the alert
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        if menu === self.menu { statusItemClicked() }
     }
 
     func requestNotificationAuth() {
@@ -357,7 +363,7 @@ final class LeviathanBar {
     }
 
     @objc func runAITuneup() {
-        runCLIAsync(["ai", "tuneup"]) { [weak self] output in
+        runCLIAsync(["ai", "tuneup"], timeout: 120) { [weak self] output in
             self?.showResult("AI Tune-up", output)
         }
     }
@@ -477,21 +483,21 @@ final class LeviathanBar {
         panel.allowedContentTypes = [UTType(filenameExtension: "pkg")!]
         panel.message = "Select a .pkg installer to check"
         if panel.runModal() == .OK, let url = panel.url {
-            runCLIAsync(["pkg", url.path]) { [weak self] output in
+            runCLIAsync(["pkg", url.path], timeout: 300) { [weak self] output in
                 self?.showResult("Check installer", output)
             }
         }
     }
 
     @objc func showRecentActivity() {
-        let result = runCLI(["status"], timeout: 10)
-        // Show last 10 lines
-        let lines = result.split(separator: "\n").suffix(10).joined(separator: "\n")
-        showAlert("Recent Activity (last 10 entries)", lines)
+        runCLIAsync(["status"]) { [weak self] result in
+            let lines = result.split(separator: "\n").suffix(10).joined(separator: "\n")
+            self?.showAlert("Recent Activity (last 10 entries)", lines)
+        }
     }
 
     @objc func runFullScan() {
-        runCLIAsync(["scan"]) { [weak self] output in
+        runCLIAsync(["scan"], timeout: 300) { [weak self] output in
             self?.showResult("Full scan", output)
         }
     }
@@ -518,33 +524,68 @@ final class LeviathanBar {
         }
     }
 
+    var cleanOsascript = Set<String>()  // already checked and harmless: skip re-reading its script every 3 s
+
     func checkPasswordBoxes() {
         guard level >= 2 else { return }
-        let result = runCLI(["-axo", "pid=,ppid=,command="], timeout: 5, exe: "/bin/ps")
-        let lines = result.split(separator: "\n")
-        for line in lines {
+        let result = runCLI(["-axwwo", "pid=,ppid=,command="], timeout: 5, exe: "/bin/ps")  // ww: full command lines, or a long inline script is cut before the part that matters
+        var procs: [String: (ppid: String, cmd: String)] = [:]
+        for line in result.split(separator: "\n") {
             let parts = line.split(separator: " ", maxSplits: 2)
-            if parts.count < 3 { continue }
-            let pid = String(parts[0])
-            let ppid = String(parts[1])
-            let cmd = String(parts[2])
-            let prog = (String(cmd.split(separator: " ").first ?? "") as NSString).lastPathComponent
-            if prog == "osascript" && cmd.localizedCaseInsensitiveContains("hidden answer") {  // the program itself, not a shell that mentions it
-                if !isParentTerminal(ppid: ppid) {
-                    if let p = Int32(pid) { kill(p, SIGKILL) }
-                    _ = runCLI(["note-event", "password-box", pid], timeout: 2)
-                    hasUnreadAlert = true
-                    updateIconColor()
-                    showWarning("Fake password box blocked", "Terminated osascript PID \(pid)")
-                }
-            }
+            if parts.count == 3 { procs[String(parts[0])] = (String(parts[1]), String(parts[2]).trimmingCharacters(in: .whitespaces)) }  // ps pads columns
+        }
+        var killed: [String] = []
+        for (pid, pr) in procs {
+            let prog = (String(pr.cmd.split(separator: " ").first ?? "") as NSString).lastPathComponent
+            guard prog == "osascript", !cleanOsascript.contains(pid + pr.cmd) else { continue }
+            guard asksHiddenAnswer(pr.cmd), !typedAtTerminalPrompt(pid, procs) else { cleanOsascript.insert(pid + pr.cmd); continue }
+            if let p = Int32(pid) { kill(p, SIGKILL) }
+            killed.append(pid)
+        }
+        if cleanOsascript.count > 5000 { cleanOsascript.removeAll() }
+        for pid in killed {
+            _ = runCLI(["note-event", "password-box", pid], timeout: 10)
+            hasUnreadAlert = true
+            updateIconColor()
+            showWarning("Fake password box blocked", "Terminated osascript PID \(pid)")
         }
     }
 
-    func isParentTerminal(ppid: String) -> Bool {
-        let result = runCLI(["-p", ppid, "-o", "comm="], timeout: 2, exe: "/bin/ps")
-        let comm = (result.trimmingCharacters(in: .whitespacesAndNewlines) as NSString).lastPathComponent  // ps prints the full path
-        return comm == "Terminal" || comm == "iTerm2" || comm == "iTerm"
+    // True when the inline script, or a script file it runs, asks for a hidden answer (AppleScript or JavaScript).
+    func asksHiddenAnswer(_ cmd: String) -> Bool {
+        func hit(_ t: String) -> Bool { t.lowercased().components(separatedBy: .whitespacesAndNewlines).joined().contains("hiddenanswer") }
+        if hit(cmd) { return true }
+        // shortcut: splits on spaces, so a script path containing spaces is missed; scripts fed on stdin are never seen
+        for arg in cmd.split(separator: " ").dropFirst() where arg.hasPrefix("/") || arg.hasSuffix(".scpt") || arg.hasSuffix(".applescript") || arg.hasSuffix(".js") {
+            let path = String(arg)
+            // regular files under 1 MB only: /dev/zero or a pipe would hang this guard
+            guard let at = try? FileManager.default.attributesOfItem(atPath: path), at[.type] as? FileAttributeType == .typeRegular,
+                  (at[.size] as? NSNumber)?.intValue ?? Int.max < 1_000_000,
+                  let data = FileManager.default.contents(atPath: path) else { continue }
+            if let text = String(data: data.prefix(65536), encoding: .utf8), hit(text) { return true }
+            if path.hasSuffix(".scpt") && hit(runCLI([path], timeout: 5, exe: "/usr/bin/osadecompile")) { return true }
+        }
+        return false
+    }
+
+    // Real executable path from the kernel; argv[0] in ps output can be set to anything.
+    func exePath(_ pid: String) -> String {
+        guard let p = Int32(pid) else { return "" }
+        var buf = [CChar](repeating: 0, count: 4096)
+        return proc_pidpath(p, &buf, UInt32(buf.count)) > 0 ? String(cString: buf) : ""
+    }
+
+    // Exempt only an osascript typed straight at a Terminal or iTerm prompt: osascript, then a shell, then login or the
+    // terminal itself. A script run by a pasted `curl | bash` has an extra shell in between, so it is still blocked.
+    func typedAtTerminalPrompt(_ pid: String, _ procs: [String: (ppid: String, cmd: String)]) -> Bool {
+        let terminals = ["/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal",
+                         "/Applications/iTerm.app/Contents/MacOS/iTerm2"]
+        let shells = ["/bin/zsh", "/bin/bash", "/bin/sh", "/opt/homebrew/bin/fish", "/opt/homebrew/bin/bash"]
+        guard let shell = procs[pid]?.ppid, shells.contains(exePath(shell)),
+              let up = procs[shell]?.ppid else { return false }
+        if terminals.contains(exePath(up)) { return true }
+        guard exePath(up) == "/usr/bin/login", let term = procs[up]?.ppid else { return false }
+        return terminals.contains(exePath(term))
     }
 
     var notificationAuthorized = false
@@ -626,9 +667,9 @@ final class LeviathanBar {
         return String(data: data, encoding: .utf8) ?? ""
     }
 
-    func runCLIAsync(_ args: [String], stdin: String? = nil, completion: @escaping (String) -> Void) {
+    func runCLIAsync(_ args: [String], timeout: TimeInterval = 10, stdin: String? = nil, completion: @escaping (String) -> Void) {
         DispatchQueue.global(qos: .utility).async {
-            let result = self.runCLI(args, timeout: 10, stdin: stdin)
+            let result = self.runCLI(args, timeout: timeout, stdin: stdin)
             DispatchQueue.main.async {
                 completion(result)
             }

@@ -31,6 +31,7 @@ cat > "$LA/com.leviathan.watch.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict><key>Label</key><string>com.leviathan.watch</string>
 <key>ProgramArguments</key><array><string>$PY</string><string>$S/bin/leviathan.py</string><string>scan-all</string></array>
+<key>StartInterval</key><integer>3600</integer>
 <key>WatchPaths</key><array><string>$HOME/Downloads</string><string>/Applications</string><string>$LA</string><string>/Library/LaunchAgents</string><string>/Library/LaunchDaemons</string></array>
 <key>ThrottleInterval</key><integer>5</integer><key>LowPriorityIO</key><true/><key>Nice</key><integer>10</integer></dict></plist>
 EOF

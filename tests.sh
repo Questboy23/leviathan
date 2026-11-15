@@ -44,6 +44,21 @@ ok "scan does not report the clean app" '! echo "$SC" | grep -q "Clean.app"'
 ok "scan changes nothing" '[ -e "$T/apps/Fake.app/Contents/MacOS/Fake" ]'
 ok "bad undo number is refused politely" '$M undo abc | grep -q "Use the number"'
 
+# 2c. check answers "is this a virus?"; quarantine deletes itself after 7 days
+printf 'LEVIATHAN-TEST-MALWARE-7731' > "$T/bad.bin"; printf 'hello' > "$T/plain.txt"
+ok "check flags malware" '$M check "$T/bad.bin" | grep -q "Likely malware"; [ ${PIPESTATUS[0]} = 1 ]'
+ok "check passes a plain file and says what it can miss" '$M check "$T/plain.txt" | grep -q "can still pass"'
+ok "check --contain removes malware (flag first)" '$M check --contain "$T/bad.bin" >/dev/null; [ ! -e "$T/bad.bin" ]'
+Q="$LEVIATHAN_STATE/quarantine"; mkdir -p "$Q"; printf x > "$Q/20200101-000000-old.bin"; printf x > "$Q/$(date +%Y%m%d-%H%M%S)-new.bin"; printf x > "$Q/notours.bin"
+$M purge >/dev/null
+ok "purge deletes items older than 7 days" '[ ! -e "$Q/20200101-000000-old.bin" ]'
+ok "purge keeps recent items" 'ls "$Q" | grep -q -- "-new.bin"'
+ok "purge leaves files it did not make" '[ -e "$Q/notours.bin" ]'
+ok "purge is logged" 'grep -q "\"deleted\"" "$LEVIATHAN_STATE/ledger.jsonl"'
+printf x > "$T/gone.txt"; $M contain "$T/gone.txt" >/dev/null; rm -f "$Q"/*-gone.txt
+GID=$(grep '"contained"' "$LEVIATHAN_STATE/ledger.jsonl" | tail -1 | $PY -c 'import json,sys;print(json.loads(sys.stdin.read())["id"])')
+ok "undo after deletion explains instead of crashing" '$M undo "$GID" | grep -q "deleted after 7 days"'
+
 # 3. auto-start: fake Apple job with unsigned hidden program is contained
 printf 'int main(){return 0;}' > "$T/a.c"; clang -o "$T/.hidden/trustd" "$T/a.c" 2>/dev/null && codesign --remove-signature "$T/.hidden/trustd"
 cat > "$T/agents/com.apple.trustd.helper.plist" <<EOF

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Leviathan: stops viruses before they run on a Mac. Every action is logged and undoable.
 Commands: scan | scan-downloads | scan-apps | scan-persist | sweep [--fix] | check-cmd CMD |
-          pwwatch | undo ID | undo-settings | status | verify | contain PATH | fix-chrome-notify"""
-import datetime, hashlib, json, os, plistlib, re, shutil, subprocess, sys, time, signal
+          pwwatch | undo ID | undo-settings | status | verify | contain PATH | check PATH [--contain] |
+          purge | fix-chrome-notify"""
+import datetime, hashlib, json, os, plistlib, re, shlex, shutil, subprocess, sys, time, signal
 
 os.umask(0o077)  # the log and quarantine are readable by you only
 HOME = os.path.expanduser("~")
@@ -236,9 +237,51 @@ def contain(path, reason, after=None):
                 pass
     i = ledger_add("contained", path=path, reason=reason,
                    undo={"type": "move", "src": dst, "dst": path, "modes": modes, "after": after or []})
-    notify(f"Removed a threat: {os.path.basename(path)}. It can't run. Undo: leviathan undo {i}")
+    notify(f"Removed a threat: {os.path.basename(path)}. It can't run. Deleted for good in {KEEP_DAYS} days. Undo: leviathan undo {i}")
     start_pwwatch()
     return i
+
+
+KEEP_DAYS = 7
+
+
+def purge(days=KEEP_DAYS, now=None):
+    """Deletes quarantined items for good once they are older than `days` (the date is in the name contain() gives)."""
+    if not os.path.isdir(QUAR):
+        return 0
+    cut, n = (now or time.time()) - days * 86400, 0
+    for name in os.listdir(QUAR):
+        try:
+            t = time.mktime(time.strptime(name[:15], "%Y%m%d-%H%M%S"))
+        except ValueError:
+            continue  # not made by contain(): leave it
+        if t > cut:
+            continue
+        p = os.path.join(QUAR, name)
+        try:
+            shutil.rmtree(p) if os.path.isdir(p) and not os.path.islink(p) else os.remove(p)
+        except OSError:
+            continue
+        ledger_add("deleted", path=p, reason=f"kept in quarantine {days} days, not undone")
+        n += 1
+    return n
+
+
+def check_file(path):
+    """Plain-words answer to 'is this likely a virus?'. Returns the verdict level."""
+    if not os.path.exists(path):
+        print(f"No such file: {path}")
+        return "missing"
+    level, why = verdict(path)
+    if level == "bad":
+        print(f"Likely malware: {why}.\nRemove it: leviathan contain {shlex.quote(path)} (undoable for {KEEP_DAYS} days, then deleted).")
+    elif level == "unverified":
+        print(f"Unknown: {why}. Many free apps are unsigned, so this alone does not mean a virus.\n"
+              "Safer: open it with Leviathan's sandbox (no access to your files or the internet).")
+    else:
+        print("No known threat found. Checked: Apple's malware rules, the site it came from, and Apple's signature.\n"
+              "New malware that none of these know yet can still pass.")
+    return level
 
 
 def note(path, reason):
@@ -263,6 +306,9 @@ def undo(i):
         return
     u = e["undo"]
     if u["type"] == "move":
+        if not os.path.lexists(u["src"]):
+            print(f"Entry {i} can't be undone: it was deleted after {KEEP_DAYS} days in quarantine.")
+            return
         shutil.move(u["src"], u["dst"])
         for rel, m in u.get("modes", {}).items():
             p = u["dst"] if rel == "." else os.path.join(u["dst"], rel)
@@ -771,13 +817,13 @@ def main():
     a = sys.argv[1:] or ["status"]
     c = a[0]
     if c == "scan-downloads":
-        scan_dir(DOWNLOADS, "downloads")
+        scan_dir(DOWNLOADS, "downloads"); purge()
     elif c == "scan-apps":
         scan_dir("/Applications", "apps", only_apps=True)
     elif c == "scan-persist":
         scan_persist()
     elif c == "scan-all":
-        scan_dir(DOWNLOADS, "downloads"); scan_dir("/Applications", "apps", only_apps=True); scan_persist()
+        scan_dir(DOWNLOADS, "downloads"); scan_dir("/Applications", "apps", only_apps=True); scan_persist(); purge()
     elif c == "sweep":
         fix = "--fix" in a
         res = sweep_system(fix) if os.geteuid() == 0 else sweep_user(fix)
@@ -791,6 +837,14 @@ def main():
             start_pwwatch()
     elif c == "contain" and len(a) > 1:
         contain(a[1], "removed by you")
+    elif c == "check" and [x for x in a[1:] if x != "--contain"]:
+        target = [x for x in a[1:] if x != "--contain"][0]
+        lvl = check_file(target)
+        if lvl == "bad" and "--contain" in a:
+            contain(target, "removed by you after check")
+        sys.exit(1 if lvl in ("bad", "missing") else 0)
+    elif c == "purge":
+        print(f"Deleted {purge()} quarantined item(s) older than {KEEP_DAYS} days.")
     elif c == "pwwatch":
         pwwatch()
     elif c == "undo" and len(a) > 1:

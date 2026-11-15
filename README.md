@@ -7,7 +7,7 @@
 
 **Leviathan stops viruses before they run on your Mac.** It moves real malware where it can't run, blocks scam and malware sites in every app, and stops the "paste this command" trick. It stays silent the rest of the time, and every action can be undone.
 
-Version 2.0.2. 96 of 96 tests pass on macOS 26 (Apple silicon).
+Version 2.0.3. 104 of 104 tests pass on macOS 26 (Apple silicon).
 
 ## Install
 
@@ -23,7 +23,7 @@ You need a Mac and [Homebrew](https://brew.sh). Leviathan installs its 3 helpers
 2. Paste this line and press Return:
 
 ```
-cd ~ && curl -fsSL https://github.com/Questboy23/leviathan/archive/refs/tags/v2.0.2.tar.gz | tar xz && bash leviathan-2.0.2/install.sh
+cd ~ && curl -fsSL https://github.com/Questboy23/leviathan/archive/refs/tags/v2.0.3.tar.gz | tar xz && bash leviathan-2.0.3/install.sh
 ```
 
 3. Type your Mac password when asked. The screen shows no dots while you type. That is normal.
@@ -57,6 +57,9 @@ Done. It takes about 1 to 3 minutes.
 | Tor mode | `leviathan mode tor on` | Checks Tor Browser is genuine and current. Files from .onion sites open only in the sandbox. |
 | AI agent guard | `leviathan agents level 2`, `leviathan agents pause` | Lists running AI agents, plants decoy secret files, warns when an agent reads them, pauses all agents at once. |
 | VPN | `leviathan vpn on` | Drives Cloudflare WARP or Mullvad if one is installed. It is not a VPN of its own. |
+| Is this a virus? | `leviathan check File`, `leviathan check --contain File` | Answers in plain words: likely malware, unknown (unsigned), or no known threat. Checks Apple's malware rules, the download site and Apple's signature. New malware none of these know can pass. |
+| Quarantine | (automatic), `leviathan undo N`, `leviathan purge` | Malware found in Downloads or Applications is moved where it cannot run. You can undo for 7 days. After 7 days it is deleted for good. Unsigned apps are never moved. |
+| Fake password boxes | (menu bar, level 2+) | Kills pop-ups that ask for your password with hidden typing (AppleScript, compiled scripts, JavaScript). One you type yourself at a Terminal prompt is allowed. |
 | Cost | `leviathan cost` | CPU time and memory of Leviathan's running processes. |
 
 **It only acts on things no one wants on their computer.** Unsigned apps, cracked apps and homemade scripts are never blocked or labeled. They still get checked for actual malware.
