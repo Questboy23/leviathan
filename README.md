@@ -7,7 +7,7 @@
 
 **Leviathan stops viruses before they run on your Mac.** It moves real malware where it can't run, blocks scam and malware sites in every app, and stops the "paste this command" trick. It stays silent the rest of the time, and every action can be undone.
 
-Version 1.0.0. Finished and tested: 34 of 34 tests pass on macOS 26 (Apple silicon).
+Version 2.0.0. 92 of 92 tests pass on macOS 26 (Apple silicon).
 
 ## Install
 
@@ -23,7 +23,7 @@ You need a Mac and [Homebrew](https://brew.sh). Leviathan installs its 3 helpers
 2. Paste this line and press Return:
 
 ```
-cd ~ && curl -fsSL https://github.com/Questboy23/leviathan/archive/refs/tags/v1.0.0.tar.gz | tar xz && bash leviathan-1.0.0/install.sh
+cd ~ && curl -fsSL https://github.com/Questboy23/leviathan/archive/refs/tags/v2.0.0.tar.gz | tar xz && bash leviathan-2.0.0/install.sh
 ```
 
 3. Type your Mac password when asked. The screen shows no dots while you type. That is normal.
@@ -45,6 +45,19 @@ Done. It takes about 1 to 3 minutes.
 | III. Paste guard | Pasted Terminal commands that download and run code, unscramble hidden code, strip Apple's safety check, or draw a fake password box | Stops the command once and says why. Press Enter again to run it anyway. |
 | IV. Site filter | About 300,000 known scam and malware sites, refreshed every hour, plus Quad9 and Cloudflare malware filtering | The site never loads, in any app. A watchdog switches back to normal internet within 20 seconds if the filter fails or a hotel Wi-Fi login page needs it. |
 | V. Settings | Firewall off, Apple's app checks off, security updates off, AirDrop open to everyone | Turns each one on. Undoable. Also reports disk encryption, remote login and settings profiles. |
+
+### New in 2.0
+
+| Feature | Command | What it does |
+|---|---|---|
+| Menu bar icon | (installed) | A shield next to Wi-Fi and battery. Pick a level or mode from it; it turns orange on an alert. |
+| Levels 1 to 5 | `leviathan level 3` | Each level adds checks and costs more prompts. `leviathan level` lists what each adds. |
+| Crypto mode | `leviathan mode crypto on` | Warns when a copied wallet address is swapped, or a recovery phrase is copied. Checks wallet app signatures. |
+| Untrusted apps mode | `leviathan sandbox App.app`, `leviathan pkg File.pkg` | Runs an app with no access to your files or internet. Shows what an installer's scripts will do before you run it. |
+| Tor mode | `leviathan mode tor on` | Checks Tor Browser is genuine and current. Files from .onion sites open only in the sandbox. |
+| AI agent guard | `leviathan agents level 2`, `leviathan agents pause` | Lists running AI agents, plants decoy secret files, warns when an agent reads them, pauses all agents at once. |
+| VPN | `leviathan vpn on` | Drives Cloudflare WARP or Mullvad if one is installed. It is not a VPN of its own. |
+| Cost | `leviathan cost` | CPU time and memory of Leviathan's running processes. |
 
 **It only acts on things no one wants on their computer.** Unsigned apps, cracked apps and homemade scripts are never blocked or labeled. They still get checked for actual malware.
 

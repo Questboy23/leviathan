@@ -717,29 +717,18 @@ def tor_check():
 
 # ---------- cost ----------
 def cost():
-    """Print CPU seconds used by Leviathan processes in last day from ledger, and menu bar app RSS."""
-    # Ledger timings
-    cpu_total = 0.0
-    day_ago = time.time() - 86400
-    for e in L._entries():
-        try:
-            t = datetime.datetime.fromisoformat(e["time"].replace("Z", "+00:00")).timestamp()
-        except Exception:
+    """CPU time and memory of the Leviathan processes running now, read from ps (nothing is estimated)."""
+    code, out = L.run(["/bin/ps", "-axo", "pid=,rss=,time=,command="], timeout=10)
+    cpu, rss, names = 0.0, 0, []
+    for line in (out.splitlines() if code == 0 else []):
+        parts = line.split(None, 3)
+        if len(parts) < 4 or int(parts[0]) in (os.getpid(), os.getppid()) or "leviathan" not in parts[3].lower() or os.path.basename(parts[3].split()[0]) in ("bash", "zsh", "sh", "grep"):
             continue
-        if t < day_ago:
-            continue
-        cpu_total += e.get("cpu_seconds", 0.0)
-    # Menu bar app RSS
-    rss = 0
-    code, out = L.run(["pgrep", "-f", "LeviathanBar"], timeout=10)
-    if code == 0:
-        for pid in out.split():
-            try:
-                code2, out2 = L.run(["ps", "-o", "rss=", pid], timeout=10)
-                rss += int(out2.strip() or 0)
-            except Exception:
-                pass
-    return f"CPU (last 24h): {cpu_total:.1f}s\nMenu bar RSS: {rss} KB"
+        m, _, sec = parts[2].rpartition(":")
+        h, _, m = m.rpartition(":")
+        cpu += float(sec) + 60 * float(m or 0) + 3600 * float(h.replace("-", "") or 0)
+        rss += int(parts[1]); names.append(os.path.basename(parts[3].split(" -")[0]))
+    return f"Leviathan processes running: {len(names)} ({', '.join(sorted(set(names))) or 'none'})\nCPU time since they started: {cpu:.1f}s\nMemory now: {rss // 1024} MB"
 
 # ---------- note-event ----------
 def note_event(kind, detail):

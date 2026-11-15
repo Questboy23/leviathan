@@ -164,7 +164,7 @@ $M note-event test_kind "test detail" >/dev/null
 ok "note-event logs to ledger" 'grep -q "test_kind" "$LEVIATHAN_STATE/ledger.jsonl"'
 
 # 8m. wallet_apps runs (read-only)
-$M -c "import sys;sys.path.insert(0,'$SRC');import levplus;print(levplus.wallet_apps())" >/dev/null
+$PY -c "import sys;sys.path.insert(0,'$SRC');import levplus;print(levplus.wallet_apps())" >/dev/null
 ok "wallet_apps runs" '[ $? = 0 ]'
 
 # 8n. agent_level get/set

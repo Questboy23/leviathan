@@ -989,8 +989,10 @@ def main():
                 print(LP.vpn_off())
         else:
             print("Usage: leviathan vpn <status|on|off>")
-    else:
+    elif c == "status":
         status()
+    else:
+        sys.exit("leviathan: unknown command or missing argument: %s\nCommands: see the top of leviathan.py or the README" % " ".join(a))
 
 if __name__ == "__main__":
     main()
