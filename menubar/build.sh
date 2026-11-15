@@ -48,5 +48,6 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
+codesign --force --deep -s - "$APP_DIR"  # whole-bundle signature, so macOS does not kill the app after an update
 echo "Build complete: $APP_DIR"
 ls -la "$MACOS_DIR/"

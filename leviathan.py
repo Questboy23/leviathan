@@ -875,29 +875,36 @@ def main():
         else:
             app = a[1]
             net = "--net" in a
-            # Find the main executable
+            exe = app
             if app.endswith(".app") and os.path.isdir(app):
-                exe = os.path.join(app, "Contents/MacOS")
-                # find the actual binary
-                try:
-                    for f in os.listdir(exe):
-                        p = os.path.join(exe, f)
-                        if os.path.isfile(p) and os.access(p, os.X_OK):
-                            exe = p
-                            break
+                try:  # the bundle names its own executable; the first file in MacOS/ may be a helper
+                    with open(os.path.join(app, "Contents/Info.plist"), "rb") as f:
+                        exe = os.path.join(app, "Contents/MacOS", plistlib.load(f)["CFBundleExecutable"])
                 except Exception:
-                    pass
-            else:
-                exe = app
-            container = os.path.basename(app).replace(".app", "").replace(" ", "_")
+                    sys.exit("Not a normal app: no executable named in Info.plist")
+            if not (os.path.isfile(exe) and os.access(exe, os.X_OK)):
+                sys.exit("Cannot run: " + exe)
+            ent = subprocess.run(["/usr/bin/codesign", "-d", "--entitlements", "-", app], capture_output=True, text=True).stdout
+            if "com.apple.security.app-sandbox" in ent:  # macOS kills an app sandboxed twice
+                sys.exit("%s already runs in Apple's own sandbox (App Store rules). Open it normally." % os.path.basename(app))
+            name = os.path.basename(app.rstrip("/"))
+            name = name[:-4] if name.endswith(".app") else name
+            container = re.sub(r"[^A-Za-z0-9_-]", "_", name).strip("_") or "app"  # no dots: ".." must never reach the path
             home = os.path.expanduser("~")
-            profile = LP.sandbox_profile(home, container, net)
-            profile_path = os.path.join(home, "Library/Application Support/Leviathan/sandbox", container, "profile.sb")
-            os.makedirs(os.path.dirname(profile_path), exist_ok=True)
+            box = os.path.join(home, "Library/Application Support/Leviathan/sandbox", container)
+            os.makedirs(box, exist_ok=True)
+            profile_path = os.path.join(box, "profile.sb")
             with open(profile_path, "w") as f:
-                f.write(profile)
-            os.makedirs(os.path.join(home, "Library/Application Support/Leviathan/sandbox", container), exist_ok=True)
-            subprocess.Popen(["sandbox-exec", "-f", profile_path, exe])
+                f.write(LP.sandbox_profile(home, container, net, app))
+            log = os.path.join(box, "sandbox.log")  # a file, not a pipe: a long-running app must never block on output
+            with open(log, "w") as lf:
+                p = subprocess.Popen(["/usr/bin/sandbox-exec", "-f", profile_path, exe], stdout=lf, stderr=lf, start_new_session=True)
+            try:
+                p.wait(timeout=2)
+                err = open(log, errors="replace").read().strip()[-400:]
+                sys.exit("Sandbox could not start it: " + (err or "exit code %d" % p.returncode))
+            except subprocess.TimeoutExpired:
+                print("Started %s in a sandbox: no access to your files%s. Its own folder: %s" % (os.path.basename(app), "" if net else " or the internet", box))
     elif c == "pkg" and len(a) > 1:
         if LP:
             print(LP.pkg_inspect(a[1]))

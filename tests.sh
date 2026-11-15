@@ -190,9 +190,15 @@ ok "agents tripped output mentions tripwire" 'echo "$TRIPPED_OUT" | grep -q "Tri
 PROF_AGENT=$($PY -c "import sys;sys.path.insert(0,'$SRC');import levplus;print(levplus.sandbox_profile_agent('/Users/test', 'container1', '/Users/test/project'))")
 ok "sandbox_profile_agent denies home" 'echo "$PROF_AGENT" | grep -q "deny file-read.*Users/test"'
 ok "sandbox_profile_agent allows project dir" 'echo "$PROF_AGENT" | grep -q "allow file-read.*Users/test/project"'
-ok "sandbox_profile_agent allows tmp" 'echo "$PROF_AGENT" | grep -q "allow file-read.*/tmp"'
+ok "sandbox_profile_agent allows tmp writes" 'echo "$PROF_AGENT" | grep -q "allow file-write.*/private/tmp"'
 ok "sandbox_profile_agent denies network" 'echo "$PROF_AGENT" | grep -q "deny network"'
-ok "sandbox_profile_agent allows anthropic" 'echo "$PROF_AGENT" | grep -q "api.anthropic.com"'
+ok "sandbox_profile_agent allows HTTPS only" 'echo "$PROF_AGENT" | grep -q "remote tcp \"\*:443\""'
+# 8q2. profiles are enforced by the real sandbox-exec, not just present as text
+RT=$(cd "$T" && pwd -P); echo "$PROF" | sed "s#/Users/test#$RT/home#g" > "$T/app.sb"; mkdir -p "$T/home/Library/Application Support/Leviathan/sandbox/container1"; echo s > "$T/home/secret"; echo c > "$T/home/Library/Application Support/Leviathan/sandbox/container1/f"
+ok "sandbox blocks home files" '! sandbox-exec -f "$T/app.sb" /bin/cat "$T/home/secret" >/dev/null 2>&1'
+ok "sandbox allows its container" 'sandbox-exec -f "$T/app.sb" /bin/cat "$T/home/Library/Application Support/Leviathan/sandbox/container1/f" >/dev/null 2>&1'
+ok "sandbox allows macOS files" 'sandbox-exec -f "$T/app.sb" /bin/ls /System >/dev/null 2>&1'
+ok "sandbox blocks internet" '! sandbox-exec -f "$T/app.sb" /usr/bin/python3 -I -c "import socket;socket.create_connection((\"1.1.1.1\",443),timeout=5)" 2>/dev/null'
 
 # 8r. ai_safety_check runs (read-only)
 $M ai safety >/dev/null

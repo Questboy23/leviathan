@@ -64,11 +64,14 @@ final class LeviathanBar {
         RunLoop.main.add(clipboardTimer!, forMode: .common)
     }
 
+    var passwordBoxSource: DispatchSourceTimer?
     func startPasswordBoxMonitor() {
-        passwordBoxTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-            self?.checkPasswordBoxes()
-        }
-        RunLoop.main.add(passwordBoxTimer!, forMode: .common)
+        // Runs on its own queue: an alert or open menu on the main thread can never pause this guard.
+        let t = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        t.schedule(deadline: .now() + 3, repeating: 3.0)
+        t.setEventHandler { [weak self] in self?.checkPasswordBoxes() }
+        t.resume()
+        passwordBoxSource = t
     }
 
     func startVPNMonitor() {
@@ -517,7 +520,7 @@ final class LeviathanBar {
 
     func checkPasswordBoxes() {
         guard level >= 2 else { return }
-        let result = runCLI(["ps", "-axo", "pid=,ppid=,command="], timeout: 5)
+        let result = runCLI(["-axo", "pid=,ppid=,command="], timeout: 5, exe: "/bin/ps")
         let lines = result.split(separator: "\n")
         for line in lines {
             let parts = line.split(separator: " ", maxSplits: 2)
@@ -525,9 +528,10 @@ final class LeviathanBar {
             let pid = String(parts[0])
             let ppid = String(parts[1])
             let cmd = String(parts[2])
-            if cmd.contains("osascript") && cmd.localizedCaseInsensitiveContains("hidden answer") {
+            let prog = (String(cmd.split(separator: " ").first ?? "") as NSString).lastPathComponent
+            if prog == "osascript" && cmd.localizedCaseInsensitiveContains("hidden answer") {  // the program itself, not a shell that mentions it
                 if !isParentTerminal(ppid: ppid) {
-                    _ = runCLI(["kill", "-9", pid], timeout: 2)
+                    if let p = Int32(pid) { kill(p, SIGKILL) }
                     _ = runCLI(["note-event", "password-box", pid], timeout: 2)
                     hasUnreadAlert = true
                     updateIconColor()
@@ -538,8 +542,8 @@ final class LeviathanBar {
     }
 
     func isParentTerminal(ppid: String) -> Bool {
-        let result = runCLI(["ps", "-p", ppid, "-o", "comm="], timeout: 2)
-        let comm = result.trimmingCharacters(in: .whitespacesAndNewlines)
+        let result = runCLI(["-p", ppid, "-o", "comm="], timeout: 2, exe: "/bin/ps")
+        let comm = (result.trimmingCharacters(in: .whitespacesAndNewlines) as NSString).lastPathComponent  // ps prints the full path
         return comm == "Terminal" || comm == "iTerm2" || comm == "iTerm"
     }
 
@@ -573,7 +577,7 @@ final class LeviathanBar {
             let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
             UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
         } else {
-            showAlert(title, message)
+            DispatchQueue.main.async { self.showAlert(title, message) }  // never block the timer that called us
         }
     }
 
@@ -594,36 +598,32 @@ final class LeviathanBar {
         showAlert(title, trimmed)
     }
 
-    func runCLI(_ args: [String], timeout: TimeInterval = 10, stdin: String? = nil) -> String {
+    /// Runs leviathan.py with args, or a system tool when exe is given. Output and errors share one pipe,
+    /// read before waiting, so a large output cannot block; the timeout really stops a stuck command.
+    func runCLI(_ args: [String], timeout: TimeInterval = 10, stdin: String? = nil, exe: String? = nil) -> String {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: pythonBin)
-        process.arguments = [leviathanBin] + args
-        process.standardOutput = Pipe()
-        process.standardError = Pipe()
-
-        if stdin != nil {
-            let inputPipe = Pipe()
-            process.standardInput = inputPipe
-        }
-
+        process.executableURL = URL(fileURLWithPath: exe ?? pythonBin)
+        process.arguments = exe == nil ? [leviathanBin] + args : args
+        let out = Pipe()
+        process.standardOutput = out
+        process.standardError = out
+        let input = Pipe()
+        if stdin != nil { process.standardInput = input }
         do {
             try process.run()
-            if stdin != nil {
-                if let inputPipe = process.standardInput as? Pipe {
-                    let data = stdin!.data(using: .utf8) ?? Data()
-                    try inputPipe.fileHandleForWriting.write(contentsOf: data)
-                    try inputPipe.fileHandleForWriting.close()
-                }
-            }
-            process.waitUntilExit()
-            let outputData = (process.standardOutput as? Pipe)?.fileHandleForReading.readDataToEndOfFile() ?? Data()
-            let errorData = (process.standardError as? Pipe)?.fileHandleForReading.readDataToEndOfFile() ?? Data()
-            let output = String(data: outputData, encoding: .utf8) ?? ""
-            let error = String(data: errorData, encoding: .utf8) ?? ""
-            return output + (error.isEmpty ? "" : "\n" + error)
         } catch {
             return "Error: \(error.localizedDescription)"
         }
+        let killer = DispatchWorkItem { if process.isRunning { process.terminate() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: killer)
+        if let text = stdin {
+            try? input.fileHandleForWriting.write(contentsOf: text.data(using: .utf8) ?? Data())
+            try? input.fileHandleForWriting.close()
+        }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        killer.cancel()
+        return String(data: data, encoding: .utf8) ?? ""
     }
 
     func runCLIAsync(_ args: [String], stdin: String? = nil, completion: @escaping (String) -> Void) {

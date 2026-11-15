@@ -193,29 +193,30 @@ def wallet_apps():
     return results
 
 # ---------- sandbox ----------
-def sandbox_profile(home, container, net):
-    """Pure function: returns sandbox-exec profile text."""
-    lines = [
-        "(version 1)",
-        "(deny default)",
-        f"(allow file-read* (regex \"^{re.escape(home)}/Library/Application Support/Leviathan/sandbox/{re.escape(container)}.*\"))",
-        f"(allow file-write* (regex \"^{re.escape(home)}/Library/Application Support/Leviathan/sandbox/{re.escape(container)}.*\"))",
-        "(deny file-read* (regex \"^" + re.escape(home) + ".*\"))",
-        "(deny file-write* (regex \"^" + re.escape(home) + ".*\"))",
-    ]
+def _sb(path):
+    """Quote a path for a sandbox profile string."""
+    return '"' + path.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+SECRET_DIRS = (".ssh", "Library/Keychains", "Library/Cookies", "Library/Safari",
+               "Library/Application Support/Google/Chrome", "Library/Application Support/Firefox",
+               "Library/Application Support/Ledger Live", "Library/Application Support/Exodus",
+               "Library/Application Support/Electrum", "Library/Application Support/@trezor", "Library/Application Support/Sparrow")
+
+
+def sandbox_profile(home, container, net, app=None):
+    """Pure function: sandbox-exec profile text. macOS itself stays readable so the app can start;
+    the home folder is closed except the app's own container (and the app bundle, if it lives in home).
+    In sandbox profiles the LAST matching rule wins, so the denies come first and the allows after."""
+    home = os.path.realpath(home)  # sandbox rules match real paths, not symlinks
+    box = os.path.join(home, "Library/Application Support/Leviathan/sandbox", container)
+    lines = ["(version 1)", "(allow default)",
+             f"(deny file-read* file-write* (subpath {_sb(home)}))",
+             f"(allow file-read* file-write* (subpath {_sb(box)}))"]
+    if app:
+        lines.append(f"(allow file-read* (subpath {_sb(os.path.realpath(app))}))")
+    lines += [f"(deny file-read* file-write* (subpath {_sb(os.path.join(home, d))}))" for d in SECRET_DIRS]
     if not net:
-        lines.append("(deny network*)")
-    lines.extend([
-        "(deny system-keychain)",
-        "(deny file-read* (regex \".*/(Safari|Chrome|Firefox)/.*\"))",
-        "(deny file-write* (regex \".*/(Safari|Chrome|Firefox)/.*\"))",
-        f"(deny file-read* (regex \"^{re.escape(home)}/\\.ssh.*\"))",
-        f"(deny file-write* (regex \"^{re.escape(home)}/\\.ssh.*\"))",
-        f"(deny file-read* (regex \"^{re.escape(home)}/Library/Keychains.*\"))",
-        f"(deny file-write* (regex \"^{re.escape(home)}/Library/Keychains.*\"))",
-        f"(deny file-read* (regex \"^{re.escape(home)}/Library/Application Support/(Ledger|Exodus|Electrum|Trezor|Sparrow|MetaMask).*\"))",
-        f"(deny file-write* (regex \"^{re.escape(home)}/Library/Application Support/(Ledger|Exodus|Electrum|Trezor|Sparrow|MetaMask).*\"))",
-    ])
+        lines.append("(deny network* (remote ip))")
     return "\n".join(lines)
 
 # ---------- pkg inspection ----------
@@ -1358,32 +1359,21 @@ AGENT_NETWORK_ALLOWLIST = [
 ]
 
 def sandbox_profile_agent(home, container, project_dir):
-    """Sandbox profile for agent: no reads of secret folders, writes only to project_dir and /tmp, network allowlist."""
-    lines = [
-        "(version 1)",
-        "(deny default)",
-        f"(allow file-read* (regex \"^{re.escape(home)}/Library/Application Support/Leviathan/sandbox/{re.escape(container)}.*\"))",
-        f"(allow file-write* (regex \"^{re.escape(home)}/Library/Application Support/Leviathan/sandbox/{re.escape(container)}.*\"))",
-        f"(allow file-read* (regex \"^{re.escape(project_dir)}.*\"))",
-        f"(allow file-write* (regex \"^{re.escape(project_dir)}.*\"))",
-        "(allow file-read* (regex \"^/tmp.*\"))",
-        "(allow file-write* (regex \"^/tmp.*\"))",
-        "(deny file-read* (regex \"^" + re.escape(home) + ".*\"))",
-        "(deny file-write* (regex \"^" + re.escape(home) + ".*\"))",
-        "(deny system-keychain)",
-        "(deny file-read* (regex \".*/(Safari|Chrome|Firefox)/.*\"))",
-        "(deny file-write* (regex \".*/(Safari|Chrome|Firefox)/.*\"))",
-        f"(deny file-read* (regex \"^{re.escape(home)}/\\.ssh.*\"))",
-        f"(deny file-write* (regex \"^{re.escape(home)}/\\.ssh.*\"))",
-        f"(deny file-read* (regex \"^{re.escape(home)}/Library/Keychains.*\"))",
-        f"(deny file-write* (regex \"^{re.escape(home)}/Library/Keychains.*\"))",
-        f"(deny file-read* (regex \"^{re.escape(home)}/Library/Application Support/(Ledger|Exodus|Electrum|Trezor|Sparrow|MetaMask).*\"))",
-        f"(deny file-write* (regex \"^{re.escape(home)}/Library/Application Support/(Ledger|Exodus|Electrum|Trezor|Sparrow|MetaMask).*\"))",
-    ]
-    # Network allowlist
-    for host in AGENT_NETWORK_ALLOWLIST:
-        lines.append(f"(allow network-outbound (remote host \"{host}\"))")
-    lines.append("(deny network*)")
+    """Agent sandbox: reads macOS and the project; writes only to the project, its container and /tmp;
+    secret folders closed. sandbox-exec cannot filter by host name, so the network allowlist is by port:
+    HTTPS (443) and DNS only."""
+    home = os.path.realpath(home)  # sandbox rules match real paths, not symlinks
+    box = os.path.join(home, "Library/Application Support/Leviathan/sandbox", container)
+    lines = ["(version 1)", "(allow default)",
+             f"(deny file-read* file-write* (subpath {_sb(home)}))",
+             "(deny file-write* (subpath \"/\"))",
+             f"(allow file-read* file-write* (subpath {_sb(box)}))",
+             f"(allow file-read* file-write* (subpath {_sb(os.path.realpath(project_dir))}))",
+             "(allow file-write* (subpath \"/private/tmp\") (subpath \"/private/var/folders\") (literal \"/dev/null\") (literal \"/dev/tty\"))"]
+    lines += [f"(deny file-read* file-write* (subpath {_sb(os.path.join(home, d))}))" for d in SECRET_DIRS]
+    lines += ["(deny network-outbound (remote ip))", "(deny network-outbound (remote unix-socket))",  # SSH agent, Docker socket
+              "(allow network-outbound (literal \"/private/var/run/mDNSResponder\"))", "(allow network-outbound (remote tcp \"*:443\"))",
+              "(allow network-outbound (remote udp \"*:53\"))"]
     return "\n".join(lines)
 
 def agents_run(cmd_args):
@@ -1392,7 +1382,9 @@ def agents_run(cmd_args):
         return "Agent level is not 3 (Lockdown). Use `leviathan agents level 3` to enable."
 
     home = os.path.expanduser("~")
-    project_dir = os.getcwd()
+    project_dir = os.path.realpath(os.getcwd())
+    if os.path.realpath(home).startswith(project_dir):  # home itself or a folder above it would reopen everything
+        return "Run this from a project folder inside your home folder, not from %s." % project_dir
     container = f"agent-{int(time.time())}"
 
     profile = sandbox_profile_agent(home, container, project_dir)
@@ -1407,7 +1399,8 @@ def agents_run(cmd_args):
 
     # Run under sandbox-exec
     try:
-        subprocess.Popen(["sandbox-exec", "-f", profile_path] + cmd_args)
+        keep = {k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "USER", "LANG", "TERM", "SHELL", "TMPDIR") or k.endswith("_API_KEY") and k.startswith(("ANTHROPIC", "OPENAI"))}
+        subprocess.Popen(["/usr/bin/sandbox-exec", "-f", profile_path] + cmd_args, env=keep)  # no GitHub, AWS or SSH-agent secrets
         return f"Started agent in sandbox (container: {container})."
     except Exception as e:
         return f"Failed to start sandboxed agent: {e}"
