@@ -13,7 +13,7 @@ for f in dnscrypt-proxy yara python3; do
 done
 PY="$P/bin/python3"
 mkdir -p "$S/bin" "$S/quarantine"; chmod 700 "$S"
-cp "$SRC/leviathan.py" "$SRC/levplus.py" "$SRC/bip39.txt" "$SRC/dnswatch.sh" "$SRC/install-root.sh" "$SRC/uninstall.sh" "$S/bin/"
+cp "$SRC/leviathan.py" "$SRC/levplus.py" "$SRC/bip39.txt" "$SRC/dnswatch.sh" "$SRC/install-root.sh" "$SRC/uninstall.sh" "$SRC/fix-filter.command" "$S/bin/"
 for g in bash zsh; do sed "s#__PY__#$PY#g" "$SRC/guard.$g" > "$S/bin/guard.$g"; done
 chmod +x "$S/bin/leviathan.py" "$S/bin/dnswatch.sh"; touch "$S/ledger.jsonl"; chmod 600 "$S/ledger.jsonl"
 mkdir -p "$HOME/.local/bin"; rm -f "$HOME/.local/bin/leviathan"
@@ -95,6 +95,7 @@ EOF
         echo "  (menu bar app unavailable: no swiftc and no prebuilt copy; the protection still runs)"
 fi
 
+touch "$S/installed_at"  # tamper alert skips changes made by this run
 if [ -z "$LEVIATHAN_SKIP_ROOT" ]; then
 echo; echo "Your Mac password is needed once to turn on the site filter and safe settings."
 sudo bash "$SRC/install-root.sh" "$HOME" "$P"

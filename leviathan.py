@@ -548,7 +548,18 @@ def sweep_user(fix):
     else:
         out.append(("ok", "AirDrop limited"))
     out += chrome_report()
+    out.append(website_filter_report())
     return out
+
+
+def website_filter_report():
+    """The site filter is the system half (needs the password). Say plainly when it is not running."""
+    daemon = os.path.exists("/Library/LaunchDaemons/com.leviathan.dnscrypt.plist")
+    via_filter = "nameserver[0] : 127.0.0.1" in _read(["scutil", "--dns"])
+    if daemon and via_filter:
+        return ("ok", "Website filter on")
+    why = "its background job is not installed" if not daemon else "this Mac is not sending lookups through it"
+    return ("issue", f"Website filter is OFF ({why}). Turn it on: click the shield, then 'Website filter is off', or run  bash ~/.leviathan/bin/fix-filter.command  in Terminal; it asks for your Mac password")
 
 
 def sweep_system(fix):
@@ -1049,18 +1060,6 @@ def main():
     elif c == "wallets":
         r = LP.wallet_apps() if LP else "levplus not available"
         print("\n".join(map(str, r)) if isinstance(r, list) else r)
-    elif c == "vpn":
-        if not LP:
-            print("levplus not available")
-        elif len(a) > 1 and a[1] in ("status", "on", "off"):
-            if a[1] == "status":
-                print(LP.vpn_status())
-            elif a[1] == "on":
-                print(LP.vpn_on())
-            elif a[1] == "off":
-                print(LP.vpn_off())
-        else:
-            print("Usage: leviathan vpn <status|on|off>")
     elif c == "status":
         status()
     else:

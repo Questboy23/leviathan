@@ -17,14 +17,13 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
     var pasteboardChangeCount: Int = NSPasteboard.general.changeCount
     var clipboardTimer: Timer?
     var passwordBoxTimer: Timer?
-    var vpnTimer: Timer?
     var alertTimer: Timer?
     var level: Int = 2
     var modes: [String: Bool] = ["crypto": false, "apps": false, "tor": false, "agents": false]
-    var agentLevel: Int = 1
-    var vpnStatus: String = ""
-    var vpnClientFound: Bool = false
+    var agentLevel: Int = 2
     var hasUnreadAlert: Bool = false
+    var activeTasks = 0          // menu actions still running (main thread only)
+    var backgroundBusy = false   // a Leviathan scan or check started by its background jobs is running
     let leviathanBin: String
     let pythonBin = "/usr/bin/python3"
     let noNap = ProcessInfo.processInfo.beginActivity(options: [.userInitiatedAllowingIdleSystemSleep], reason: "menu bar guard")
@@ -42,13 +41,14 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
         checkNotificationAuth()
         startClipboardMonitor()
         startPasswordBoxMonitor()
-        startVPNMonitor()
         refreshStatus()
     }
 
     func setupUI() {
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "shield.lefthalf.filled", accessibilityDescription: "Leviathan")
+            let image = NSImage(systemSymbolName: "shield.lefthalf.filled", accessibilityDescription: "Leviathan")
+            image?.isTemplate = true  // drawn white on a dark menu bar, like Apple's own icons
+            button.image = image
             button.target = self
             button.action = #selector(statusItemClicked)
         }
@@ -57,7 +57,9 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
         menu.delegate = self  // the button action never fires once a menu is attached; opening the menu clears the alert
     }
 
-    func menuWillOpen(_ menu: NSMenu) {
+    // Called just before the menu shows. Reading the settings file takes well under a millisecond,
+    // so the menu opens at once with current checkmarks (no Python start on click).
+    func menuNeedsUpdate(_ menu: NSMenu) {
         if menu === self.menu { statusItemClicked() }
     }
 
@@ -82,13 +84,6 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
         passwordBoxSource = t
     }
 
-    func startVPNMonitor() {
-        vpnTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
-            self?.fetchVPNStatus()
-        }
-        RunLoop.main.add(vpnTimer!, forMode: .common)
-    }
-
     @objc func statusItemClicked() {
         if hasUnreadAlert {
             hasUnreadAlert = false
@@ -97,84 +92,20 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
         refreshStatus()
     }
 
+    /// Reads ~/.leviathan/settings.json directly (the file `leviathan level` and `leviathan mode` write),
+    /// then rebuilds the menu. Main thread only. Defaults match leviathan.py: level 2, agent level 2.
     func refreshStatus() {
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            self?.fetchLevelAndModes()
-            self?.fetchAgentLevel()
-            self?.fetchVPNStatus()
-        }
-    }
-
-    func fetchLevelAndModes() {
-        var newLevel = level
-        var newModes = modes
         let installed = FileManager.default.fileExists(atPath: leviathanBin)
-        var failed = false
-
-        let levelResult = runCLI(["level", "--json"], timeout: 30)
-        if let data = levelResult.data(using: .utf8),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let lvl = json["level"] as? Int {
-            newLevel = lvl
-        } else {
-            failed = true
-        }
-
-        let modeResult = runCLI(["mode", "--json"], timeout: 30)
-        if let data = modeResult.data(using: .utf8),
+        let url = URL(fileURLWithPath: NSHomeDirectory() + "/.leviathan/settings.json")
+        if let data = try? Data(contentsOf: url),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            for (key, value) in json {
-                if let boolVal = value as? Bool {
-                    newModes[key] = boolVal
-                }
-            }
-        } else {
-            failed = true
+            level = json["level"] as? Int ?? 2
+            agentLevel = json["agent_level"] as? Int ?? 2
+            var newModes: [String: Bool] = ["crypto": false, "apps": false, "tor": false, "agents": false]
+            for (k, v) in json["modes"] as? [String: Any] ?? [:] { if let b = v as? Bool { newModes[k] = b } }
+            modes = newModes
         }
-
-        if failed {  // keep the raw output so a failure is diagnosable
-            let log = "\(Date()) level=\(levelResult) mode=\(modeResult)\n"
-            let url = URL(fileURLWithPath: NSHomeDirectory() + "/.leviathan/bar.log")
-            if let h = try? FileHandle(forWritingTo: url) { h.seekToEndOfFile(); h.write(log.data(using: .utf8)!); try? h.close() }
-            else { try? log.write(to: url, atomically: true, encoding: .utf8) }
-        }
-        DispatchQueue.main.async { [weak self] in
-            self?.level = newLevel
-            self?.modes = newModes
-            self?.updateMenu(installed: installed)
-        }
-    }
-
-    func fetchAgentLevel() {
-        let result = runCLI(["agents", "level"], timeout: 30)
-        if let line = result.split(separator: "\n").first,
-           line.hasPrefix("Current agent level:") {
-            let parts = line.split(separator: ":")
-            if parts.count > 1, let lvl = Int(parts[1].trimmingCharacters(in: .whitespaces)) {
-                DispatchQueue.main.async { [weak self] in
-                    self?.agentLevel = lvl
-                    self?.updateAgentLevelChecks()
-                }
-            }
-        }
-    }
-
-    func fetchVPNStatus() {
-        let result = runCLI(["vpn", "status"], timeout: 30)
-        let status = result.trimmingCharacters(in: .whitespacesAndNewlines)
-        var clientFound = false
-
-        if status.hasPrefix("VPN:") || status.hasPrefix("Connected") || status.contains("on") {
-            clientFound = true
-        } else if status.contains("No supported VPN client found") {
-            clientFound = false
-        }
-
-        DispatchQueue.main.async { [weak self] in
-            self?.vpnStatus = status
-            self?.vpnClientFound = clientFound
-            self?.updateVPNMenu()
-        }
+        updateMenu(installed: installed)
     }
 
     func updateMenu(installed: Bool) {
@@ -193,6 +124,12 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
         let statusItem = NSMenuItem(title: "Leviathan • Level \(level) • \(modeSummary())", action: nil, keyEquivalent: "")
         statusItem.isEnabled = false
         menu.addItem(statusItem)
+        // The website filter is the half that needs your password; say so when it is not installed.
+        if !FileManager.default.fileExists(atPath: "/Library/LaunchDaemons/com.leviathan.dnscrypt.plist") {
+            let f = NSMenuItem(title: "⚠︎ Website filter is off. Turn it on…", action: #selector(turnOnFilter), keyEquivalent: "")
+            f.target = self
+            menu.addItem(f)
+        }
         menu.addItem(NSMenuItem.separator())
 
         // Level 1-5 with checkmarks
@@ -209,10 +146,6 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
 
         // AI Tune-up card
         addAITuneupMenu()
-        menu.addItem(NSMenuItem.separator())
-
-        // VPN
-        addVPNMenu()
         menu.addItem(NSMenuItem.separator())
 
         // Actions
@@ -253,6 +186,7 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
     }
 
     @objc func setLevel(_ sender: NSMenuItem) {
+        level = sender.tag  // checkmark moves at once; the file is written by the CLI below
         runCLIAsync(["level", "\(sender.tag)"]) { [weak self] output in
             if output.contains("error") || output.contains("Error") {
                 self?.showAlert("Failed to set level", output)
@@ -281,6 +215,7 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
     @objc func toggleMode(_ sender: NSMenuItem) {
         guard let key = sender.representedObject as? String else { return }
         let newState = modes[key] != true
+        modes[key] = newState
         runCLIAsync(["mode", key, newState ? "on" : "off"]) { [weak self] output in
             if output.contains("error") || output.contains("Error") {
                 self?.showAlert("Failed to toggle mode", output)
@@ -338,11 +273,12 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
     }
 
     @objc func setAgentLevel(_ sender: NSMenuItem) {
+        agentLevel = sender.tag
         runCLIAsync(["agents", "level", "\(sender.tag)"]) { [weak self] output in
             if output.contains("error") || output.contains("Error") {
                 self?.showAlert("Failed to set agent level", output)
             } else {
-                self?.fetchAgentLevel()
+                self?.refreshStatus()
             }
         }
     }
@@ -377,78 +313,12 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
         }
     }
 
-    func addVPNMenu() {
-        let submenu = NSMenu()
-
-        if vpnClientFound {
-            let statusItem = NSMenuItem(title: vpnStatus, action: nil, keyEquivalent: "")
-            statusItem.isEnabled = false
-            submenu.addItem(statusItem)
-            submenu.addItem(NSMenuItem.separator())
-
-            let onItem = NSMenuItem(title: "VPN on", action: #selector(vpnOn), keyEquivalent: "")
-            onItem.target = self
-            submenu.addItem(onItem)
-
-            let offItem = NSMenuItem(title: "VPN off", action: #selector(vpnOff), keyEquivalent: "")
-            offItem.target = self
-            submenu.addItem(offItem)
-        } else {
-            let item = NSMenuItem(title: "Get free VPN (Cloudflare WARP)", action: #selector(openWARP), keyEquivalent: "")
-            item.target = self
-            submenu.addItem(item)
-        }
-
-        let parent = NSMenuItem(title: "VPN", action: nil, keyEquivalent: "")
-        menu.setSubmenu(submenu, for: parent)
-        menu.addItem(parent)
-    }
-
-    func updateVPNMenu() {
-        // Find the VPN parent item and update its submenu
-        for item in menu.items {
-            if item.title == "VPN", let submenu = item.submenu {
-                submenu.removeAllItems()
-                if vpnClientFound {
-                    let statusItem = NSMenuItem(title: vpnStatus, action: nil, keyEquivalent: "")
-                    statusItem.isEnabled = false
-                    submenu.addItem(statusItem)
-                    submenu.addItem(NSMenuItem.separator())
-
-                    let onItem = NSMenuItem(title: "VPN on", action: #selector(vpnOn), keyEquivalent: "")
-                    onItem.target = self
-                    submenu.addItem(onItem)
-
-                    let offItem = NSMenuItem(title: "VPN off", action: #selector(vpnOff), keyEquivalent: "")
-                    offItem.target = self
-                    submenu.addItem(offItem)
-                } else {
-                    let item = NSMenuItem(title: "Get free VPN (Cloudflare WARP)", action: #selector(openWARP), keyEquivalent: "")
-                    item.target = self
-                    submenu.addItem(item)
-                }
-                break
-            }
-        }
-    }
-
-    @objc func vpnOn() {
-        runCLIAsync(["vpn", "on"]) { [weak self] output in
-            self?.showResult("VPN on", output)
-            self?.fetchVPNStatus()
-        }
-    }
-
-    @objc func vpnOff() {
-        runCLIAsync(["vpn", "off"]) { [weak self] output in
-            self?.showResult("VPN off", output)
-            self?.fetchVPNStatus()
-        }
-    }
-
-    @objc func openWARP() {
-        if let url = URL(string: "https://one.one.one.one") {
-            NSWorkspace.shared.open(url)
+    // Opens the fix in Terminal, where macOS asks for the password. Nothing here sees the password.
+    @objc func turnOnFilter() {
+        let script = URL(fileURLWithPath: NSHomeDirectory() + "/.leviathan/bin/fix-filter.command")
+        let terminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
+        NSWorkspace.shared.open([script], withApplicationAt: terminal, configuration: NSWorkspace.OpenConfiguration()) { [weak self] _, err in
+            if let err = err { self?.showAlert("Could not open Terminal", "Run this in Terminal instead: bash ~/.leviathan/bin/fix-filter.command\n\n\(err.localizedDescription)") }
         }
     }
 
@@ -522,7 +392,7 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
             pasteboardChangeCount = currentCount
             if let string = NSPasteboard.general.string(forType: .string), !string.isEmpty {
                 let limited = String(string.prefix(10240))
-                runCLIAsync(["clip"], stdin: limited) { [weak self] output in
+                runCLIAsync(["clip"], stdin: limited, counts: false) { [weak self] output in
                     if !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         self?.hasUnreadAlert = true
                         self?.updateIconColor()
@@ -535,14 +405,23 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
 
     var cleanOsascript = Set<String>()  // already checked and harmless: skip re-reading its script every 3 s
 
+    // Background scans and checks that turn the shield green while they run.
+    static let busyArgs = [" scan", " scan-all", " scan-apps", " scan-persist", " scan-downloads", " agents monitor", " sweep", " ai tuneup", " pkg ", " check "]
+
     func checkPasswordBoxes() {
-        guard level >= 2 else { return }
         let result = runCLI(["-axwwo", "pid=,ppid=,command="], timeout: 5, exe: "/bin/ps")  // ww: full command lines, or a long inline script is cut before the part that matters
         var procs: [String: (ppid: String, cmd: String)] = [:]
         for line in result.split(separator: "\n") {
             let parts = line.split(separator: " ", maxSplits: 2)
             if parts.count == 3 { procs[String(parts[0])] = (String(parts[1]), String(parts[2]).trimmingCharacters(in: .whitespaces)) }  // ps pads columns
         }
+        let busy = procs.values.contains { p in p.cmd.contains("leviathan.py") && LeviathanBar.busyArgs.contains { p.cmd.contains("leviathan.py" + $0) } }
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, self.backgroundBusy != busy else { return }
+            self.backgroundBusy = busy
+            self.updateIconColor()
+        }
+        guard level >= 2 else { return }
         var killed: [String] = []
         for (pid, pr) in procs {
             let prog = (String(pr.cmd.split(separator: " ").first ?? "") as NSString).lastPathComponent
@@ -610,11 +489,18 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
     func updateIconColor() {
         DispatchQueue.main.async { [weak self] in
             guard let self = self, let button = self.statusItem.button else { return }
-            if self.hasUnreadAlert {
-                button.contentTintColor = .systemOrange
+            // orange: an alert you have not seen; green: Leviathan is working; white (template) otherwise.
+            // contentTintColor draws black in the macOS 26 menu bar, so the color goes into the image itself.
+            let color: NSColor? = self.hasUnreadAlert ? .systemOrange : (self.activeTasks > 0 || self.backgroundBusy) ? .systemGreen : nil
+            guard let base = NSImage(systemSymbolName: "shield.lefthalf.filled", accessibilityDescription: "Leviathan") else { return }
+            if let color = color, let tinted = base.withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [color])) {
+                tinted.isTemplate = false
+                button.image = tinted
             } else {
-                button.contentTintColor = nil
+                base.isTemplate = true
+                button.image = base
             }
+            button.contentTintColor = nil
         }
     }
 
@@ -679,10 +565,13 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
         return text
     }
 
-    func runCLIAsync(_ args: [String], timeout: TimeInterval = 30, stdin: String? = nil, completion: @escaping (String) -> Void) {
-        DispatchQueue.global(qos: .utility).async {
+    /// Runs a CLI command off the main thread. counts: the shield is green while it runs. Call from the main thread.
+    func runCLIAsync(_ args: [String], timeout: TimeInterval = 30, stdin: String? = nil, counts: Bool = true, completion: @escaping (String) -> Void) {
+        if counts { activeTasks += 1; updateIconColor() }
+        DispatchQueue.global(qos: .userInitiated).async {
             let result = self.runCLI(args, timeout: timeout, stdin: stdin)
             DispatchQueue.main.async {
+                if counts { self.activeTasks -= 1; self.updateIconColor() }
                 completion(result)
             }
         }

@@ -63,3 +63,6 @@ No self-hosted VPN server (costs monthly, ties traffic to one rented IP, adds no
 - "AI Safety" = agents mode above + AI attack alert (login attempts / port probes to this Mac faster than a human, from `log show` sshd/screensharing failures and `lsof -i` listeners) + tamper alert (anything disabling Leviathan's LaunchAgents or editing its files) + MCP/skill audit (new MCP servers or skills added since last check, flagged if they run shell commands or fetch remote code).
 - "AI Tune-up" = read-only health check of AI tools: Claude Code/Cursor/Codex config present, hooks that fail or take >1 s, MCP servers that fail to connect, permission mode, oversize CLAUDE.md (>5 KB). Prints plain-English fixes; `--fix` only applies reversible ones (backup first).
 - Export: `leviathan agents export --jsonl` writes the agent event stream in the format Questboy23/alignment-monitor reads, so Palantir scores it. Leviathan does not bundle Palantir.
+
+### Removed in 2.0.7
+VPN control (`leviathan vpn`) was removed at the owner's request.

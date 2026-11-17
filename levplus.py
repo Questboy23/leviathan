@@ -482,7 +482,9 @@ def _is_agent_process(argv):
     exe = os.path.basename(argv[0]).lower()
 
     # Exclude .app/Contents/ paths (e.g., Claude desktop app)
-    if ".app/contents/" in argv[0].lower() and "/claude-code/" not in argv[0].lower():
+    interpreters = {"node", "python", "python3", "bun", "deno"}
+    # Homebrew's Python runs as .../Python.app/Contents/MacOS/Python, so interpreters stay in
+    if ".app/contents/" in argv[0].lower() and "/claude-code/" not in argv[0].lower() and exe not in interpreters:
         return None
 
     # Exact matches for agent executables
@@ -491,7 +493,6 @@ def _is_agent_process(argv):
         return exe
 
     # Interpreter + agent script
-    interpreters = {"node", "python", "python3", "bun", "deno"}
     if exe in interpreters and len(argv) > 1:
         arg1 = os.path.basename(argv[1]).lower()
         for agent in exact_agents:
@@ -900,6 +901,14 @@ def ai_attack_alert():
     return "\n".join(alerts) if alerts else "No AI attack indicators detected."
 
 # ---------- Tamper alert ----------
+def _by_installer(mtime):
+    """True when a change lines up with the last run of install.sh, which touches ~/.leviathan/installed_at.
+    shortcut: something that also touches installed_at hides its edit; a signed manifest would close that."""
+    try:
+        return abs(mtime - os.path.getmtime(os.path.join(L.HOME, ".leviathan", "installed_at"))) < 600
+    except OSError:
+        return False
+
 def tamper_alert():
     """Check if anything disabled Leviathan's LaunchAgents or edited its files."""
     alerts = []
@@ -910,7 +919,7 @@ def tamper_alert():
         try:
             st = os.stat(p)
             # Check if modified recently (last hour)
-            if time.time() - st.st_mtime < 3600:
+            if time.time() - st.st_mtime < 3600 and not _by_installer(st.st_mtime):
                 alerts.append(f"Leviathan LaunchAgent modified: {plist}")
         except Exception:
             pass
@@ -920,7 +929,7 @@ def tamper_alert():
         p = os.path.join(os.path.dirname(__file__), fname)
         try:
             st = os.stat(p)
-            if time.time() - st.st_mtime < 3600:
+            if time.time() - st.st_mtime < 3600 and not _by_installer(st.st_mtime):
                 alerts.append(f"Leviathan file modified: {fname}")
         except Exception:
             pass
@@ -1120,132 +1129,6 @@ def agents_export_jsonl():
                          "canary-create", "agent-config-audit", "ai-attack-alert", "tamper-alert", "mcp-skill-audit"):
             out_lines.append(json.dumps(e))
     return "\n".join(out_lines)
-
-# ---------- VPN ----------
-VPN_CLI_MAP = {
-    "warp": ("warp-cli", ["status"], "connected", "Cloudflare WARP"),
-    "mullvad": ("mullvad", ["status"], "connected", "Mullvad VPN"),
-    "tailscale": ("tailscale", ["status"], "Logged in", "Tailscale"),
-    "protonvpn": ("protonvpn-cli", ["status"], "Connected", "Proton VPN"),
-}
-
-def _vpn_detect():
-    """Detect installed VPN clients."""
-    found = {}
-    for key, (bin_name, _, _, label) in VPN_CLI_MAP.items():
-        path = shutil.which(bin_name)
-        if path:
-            found[key] = {"bin": path, "label": label}
-    return found
-
-def vpn_status():
-    """Report VPN status: up?, which, public IP changed?, DNS leak, IPv6 leak."""
-    found = _vpn_detect()
-    if not found:
-        return "No supported VPN client found. Install Cloudflare WARP: https://one.one.one.one"
-
-    results = []
-    active = None
-    for key, info in found.items():
-        bin_path = info["bin"]
-        _, check_arg, connected_str, label = VPN_CLI_MAP[key]
-        try:
-            code, out = L.run([bin_path] + check_arg, timeout=5)
-            is_up = connected_str.lower() in out.lower()
-            if is_up:
-                active = key
-                results.append(f"VPN: {label} - UP")
-            else:
-                results.append(f"VPN: {label} - DOWN")
-        except Exception:
-            results.append(f"VPN: {label} - ERROR checking status")
-
-    if not active:
-        results.append("\nNo VPN active.")
-        return "\n".join(results)
-
-    # Public IP check
-    try:
-        code, out = L.run(["curl", "-s", "--max-time", "5", "https://api.ipify.org"], timeout=5)
-        public_ip = out.strip()
-        if public_ip:
-            results.append(f"Public IP: {public_ip}")
-    except Exception:
-        results.append("Public IP: could not fetch")
-
-    # DNS leak check (resolve a test domain via system DNS and check if it goes to VPN DNS)
-    try:
-        # Use dig to see what resolver is used
-        code, out = L.run(["dig", "+short", "@127.0.0.1", "apple.com"], timeout=5)
-        if "ANSWER SECTION" in out or "NOERROR" in out:
-            results.append("DNS: using local resolver (127.0.0.1) - likely VPN DNS")
-        else:
-            code, out = L.run(["dig", "+short", "apple.com"], timeout=5)
-            if out.strip():
-                results.append(f"DNS: using system resolver - possible leak (resolved to {out.strip().split()[0]})")
-    except Exception:
-        results.append("DNS leak check: timeout or error")
-
-    # IPv6 leak check
-    try:
-        code, out = L.run(["curl", "-s", "--max-time", "5", "-6", "https://api6.ipify.org"], timeout=5)
-        if out.strip():
-            results.append(f"IPv6: {out.strip()} - possible IPv6 leak if VPN doesn't support IPv6")
-        else:
-            results.append("IPv6: no IPv6 connectivity (good)")
-    except Exception:
-        results.append("IPv6 leak check: timeout or error")
-
-    return "\n".join(results)
-
-def vpn_on():
-    found = _vpn_detect()
-    if not found:
-        return "No supported VPN client found. Install Cloudflare WARP: https://one.one.one.one"
-
-    # Prefer warp, then mullvad, then tailscale, then protonvpn
-    for key in ["warp", "mullvad", "tailscale", "protonvpn"]:
-        if key in found:
-            bin_path = found[key]["bin"]
-            label = found[key]["label"]
-            try:
-                if key == "warp":
-                    L.run([bin_path, "connect"], timeout=15)
-                elif key == "mullvad":
-                    L.run([bin_path, "connect"], timeout=15)
-                elif key == "tailscale":
-                    L.run([bin_path, "up"], timeout=15)
-                elif key == "protonvpn":
-                    L.run([bin_path, "connect"], timeout=15)
-                L.ledger_add("vpn", action="on", client=key)
-                return f"Started {label}."
-            except Exception as e:
-                return f"Failed to start {label}: {e}"
-    return "No VPN client could be started."
-
-def vpn_off():
-    found = _vpn_detect()
-    if not found:
-        return "No supported VPN client found."
-
-    for key in ["warp", "mullvad", "tailscale", "protonvpn"]:
-        if key in found:
-            bin_path = found[key]["bin"]
-            label = found[key]["label"]
-            try:
-                if key == "warp":
-                    L.run([bin_path, "disconnect"], timeout=10)
-                elif key == "mullvad":
-                    L.run([bin_path, "disconnect"], timeout=10)
-                elif key == "tailscale":
-                    L.run([bin_path, "down"], timeout=10)
-                elif key == "protonvpn":
-                    L.run([bin_path, "disconnect"], timeout=10)
-                L.ledger_add("vpn", action="off", client=key)
-                return f"Stopped {label}."
-            except Exception as e:
-                return f"Failed to stop {label}: {e}"
-    return "No VPN client could be stopped."
 
 # ---------- Agents level 2/3 monitoring helpers ----------
 def _agent_monitor_sensitive_access():

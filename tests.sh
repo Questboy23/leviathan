@@ -227,9 +227,8 @@ ok "ai tuneup runs" '[ $? = 0 ]'
 EXPORT_OUT=$($M agents export --jsonl 2>&1)
 ok "agents export --jsonl runs" '[ $? = 0 ]'
 
-# 8u. vpn_status runs (no VPN client, just returns not found)
-VPN_OUT=$($M vpn status 2>&1)
-ok "vpn status runs" 'echo "$VPN_OUT" | grep -q "VPN\|client\|found"'
+# 8u. VPN was removed in 2.0.7: the command no longer exists
+ok "vpn command removed" '! $M vpn status >/dev/null 2>&1'
 
 # 8v. agent_level_costs returns dict
 $PY -c "import sys;sys.path.insert(0,'$SRC');import levplus;print(levplus.agent_level_costs())" | grep -q "Watch"
@@ -284,6 +283,10 @@ ok "parse_ps leaves normal commands alone" "[ \"\$(lp \"P.parse_ps('8 /bin/ls -l
 ok "tripwire never freezes during tests" '$M agents tripped | grep -qv "was paused"'
 $PY -c "import sys; sys.path.insert(0,'$SRC'); import leviathan as L; L.ledger_add('canary-trigger', details=['Decoy aws_credentials was read'])"
 ok "status shows AI alerts" '$M status | grep -q "AI alert, canary-trigger: Decoy aws_credentials was read"'
+TH=$(mktemp -d); bi() { HOME="$TH" $PY -c "import sys,time; sys.path.insert(0,\"$SRC\"); import levplus as P; print(P._by_installer(time.time()))"; }
+ok "tamper alert: no install marker, change counts" '[ "$(bi)" = False ]'
+mkdir -p "$TH/.leviathan"; touch "$TH/.leviathan/installed_at"
+ok "tamper alert skips the installer's own changes" '[ "$(bi)" = True ]'
 
 # agent matching
 am() { $PY -c "import sys; sys.path.insert(0,\"$SRC\"); import levplus as P; print(bool(P._is_agent_process(sys.argv[1:])))" "$@"; }
@@ -293,4 +296,5 @@ ok "agent: desktop claude code" "[ \"\$(am /Users/x/Lib/Claude/claude-code/2.1/x
 ok "not agent: Claude desktop app" "[ \"\$(am /Applications/Claude.app/Contents/MacOS/Claude)\" = False ]"
 ok "not agent: zsh" "[ \"\$(am -zsh)\" = False ]"
 ok "not agent: vim cursor.txt" "[ \"\$(am vim cursor.txt)\" = False ]"
+ok "agent: python agent via Homebrew Python.app" "[ \"\$(am /opt/homebrew/Frameworks/Python.framework/Versions/3.15/Resources/Python.app/Contents/MacOS/Python /usr/local/bin/aider)\" = True ]"
 echo; echo "$pass passed, $fail failed"; rm -rf "$T"
