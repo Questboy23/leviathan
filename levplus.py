@@ -1261,6 +1261,8 @@ def _agent_monitor_startup_edits():
         if old is None:
             continue
         changed = (mtime != old) if isinstance(mtime, str) or isinstance(old, str) else abs(mtime - old) > 1
+        if changed and os.path.basename(path).startswith("com.leviathan.") and not isinstance(mtime, str) and _by_installer(mtime):
+            continue  # Leviathan's own installer rewrote its own startup file
         if changed:
             L.ledger_add("agent-startup-edit", path=path, agent="unknown")
             _notify_once([f"Startup file modified: {path}"])

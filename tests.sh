@@ -287,6 +287,18 @@ TH=$(mktemp -d); bi() { HOME="$TH" $PY -c "import sys,time; sys.path.insert(0,\"
 ok "tamper alert: no install marker, change counts" '[ "$(bi)" = False ]'
 mkdir -p "$TH/.leviathan"; touch "$TH/.leviathan/installed_at"
 ok "tamper alert skips the installer's own changes" '[ "$(bi)" = True ]'
+# startup-edit watch: Leviathan's own plists rewritten by install.sh are not AI alerts; other plists are
+se() { HOME="$TH" $PY -c "
+import sys,os,json,time; sys.path.insert(0,'$SRC'); import levplus as P, leviathan as L
+P.get_agent_level=lambda:2; P.get_modes=lambda:{'agents':True}; P._notify_once=lambda *a,**k:None
+got=[]; L.ledger_add=lambda k,**kw: got.append(os.path.basename(kw.get('path','')))
+la=os.path.join('$TH','Library/LaunchAgents'); os.makedirs(la,exist_ok=True); os.makedirs(L.STATE,exist_ok=True)
+fs=[os.path.join(la,n) for n in ('com.leviathan.bar.plist','com.evil.plist')]
+for f in fs: open(f,'w').close(); os.utime(f,(1,1))
+json.dump({f:1 for f in fs}, open(os.path.join(L.STATE,'agent_startup_mtimes.json'),'w'))
+for f in fs: os.utime(f,None)
+P._agent_monitor_startup_edits(); print(','.join(sorted(got)))"; }
+ok "startup watch ignores the installer rewriting Leviathan's own plists" '[ "$(se)" = com.evil.plist ]'
 
 # agent matching
 am() { $PY -c "import sys; sys.path.insert(0,\"$SRC\"); import levplus as P; print(bool(P._is_agent_process(sys.argv[1:])))" "$@"; }
