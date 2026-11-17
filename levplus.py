@@ -436,6 +436,13 @@ def parse_ps(text):
             pid, cmd = parts
             if pid.isdigit():
                 argv = cmd.split()
+                # ps does not quote, so a program path with spaces ("Application Support") arrives split
+                if argv and argv[0].startswith("/") and not os.access(argv[0], os.X_OK):
+                    for i in range(len(argv), 1, -1):
+                        cand = " ".join(argv[:i])
+                        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+                            argv = [cand] + argv[i:]
+                            break
                 out.append((int(pid), argv))
     return out
 
@@ -809,22 +816,24 @@ def agents_whois(code):
 
 def agents_tripped():
     """Called when an agent runs the tripwire command. Pauses the parent agent process."""
-    # Find the agent process that likely ran this (by checking recent canary reads)
-    procs = agent_procs()
-    for pid, name in procs:
-        # Check if this agent read a canary recently
-        try:
-            code, out = L.run(["lsof", "-p", str(pid), "-F", "n"], timeout=15)
-            for line in out.splitlines():
-                if line.startswith("n") and ".leviathan-canary" in line:
-                    os.kill(pid, signal.SIGSTOP)
-                    L.ledger_add("agent-tripped", agent=name, pid=pid)
-                    L.notify(f"Agent {name} (PID {pid}) triggered injection tripwire. Paused.")
-                    return f"Agent {name} (PID {pid}) paused for injection tripwire."
-        except Exception:
-            pass
-    L.ledger_add("agent-tripped", agent="unknown", detail="no matching agent found")
-    return "Tripwire triggered but no agent found holding canary files."
+    # The agent that obeyed the planted line started this command, so it is one of our ancestors.
+    for pid in sorted(_get_ancestor_pids(os.getpid())):
+        code, out = L.run(["ps", "-o", "pid=,command=", "-p", str(pid)], timeout=5)
+        parsed = parse_ps(out) if code == 0 else []
+        name = _is_agent_process(parsed[0][1]) if parsed else None
+        if not name:
+            continue
+        dry = os.environ.get("LEVIATHAN_DRY_PAUSE") == "1"  # tests run inside an agent and must not freeze it
+        if not dry:
+            try:
+                os.kill(pid, signal.SIGSTOP)
+            except Exception:
+                pass
+        L.ledger_add("agent-tripped", agent=name, pid=pid, reason="obeyed an instruction planted in a decoy file")
+        L.notify(f"AI agent {name} (PID {pid}) obeyed an instruction hidden in a decoy file and was paused. Resume: leviathan agents resume", urgent=True)
+        return f"Tripwire triggered: agent {name} (PID {pid}) {'would be' if dry else 'was'} paused."
+    L.ledger_add("agent-tripped", agent="unknown", reason="no AI agent among the processes that ran this command")
+    return "Tripwire triggered, but no AI agent started this command."
 
 # ---------- AI attack alert ----------
 APPLE_PATHS = ("/System/", "/usr/libexec/", "/usr/sbin/", "/usr/bin/", "/sbin/")
@@ -1266,7 +1275,7 @@ def _agent_monitor_sensitive_access():
                     for s in sensitive:
                         if path.startswith(s):
                             L.ledger_add("agent-sensitive-access", agent=name, pid=pid, path=path)
-                            _notify_once([f"Agent {name} (PID {pid}) accessed sensitive path: {path}"])
+                            _notify_once([f"Agent {name} (PID {pid}) accessed sensitive path: {path}"], urgent=True)
                             break
         except Exception:
             pass
@@ -1494,10 +1503,10 @@ def agents_check():
     if results:
         L.ledger_add("canary-trigger", details=results)
         if get_agent_level() >= 2:
-            _notify_once(results)
+            _notify_once(results, urgent=True)
     return "\n".join(results) if results else "No canary reads or sensitive file access detected."
 
-def _notify_once(lines):
+def _notify_once(lines, urgent=False):
     """Send each alert line as a notification the first time it is seen, so a job that
     repeats every few minutes does not repeat the same alert."""
     path = os.path.join(L.STATE, "notified.json")
@@ -1510,7 +1519,7 @@ def _notify_once(lines):
         h = hashlib.sha256(line.encode()).hexdigest()[:16]
         if h not in seen:
             seen.append(h)
-            L.notify(line)
+            L.notify(line, urgent=urgent)
     try:
         with open(path, "w") as f:
             json.dump(seen[-2000:], f)

@@ -84,12 +84,17 @@ def verify():
     return True
 
 
-def notify(msg):
+def notify(msg, urgent=False):
+    """Notification banner. urgent also opens an alert window, which Focus and Do Not Disturb
+    do not hide; it closes itself after 10 minutes and does not block the caller."""
     if QUIET:
-        print("NOTIFY:", msg)
+        print("URGENT:" if urgent else "NOTIFY:", msg)
         return
     safe = msg.replace("\\", "").replace('"', "'")
     run(["osascript", "-e", f'display notification "{safe}" with title "Leviathan"'])
+    if urgent:
+        subprocess.Popen(["osascript", "-e", f'display alert "Leviathan" message "{safe}" as critical giving up after 600'],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
 
 # ---------- detection ----------
@@ -741,14 +746,22 @@ def undo_settings():
 
 
 # ---------- status + main ----------
+AI_ALERT_KINDS = ("canary-trigger", "agent-tripped", "agent-auto-pause", "agent-sensitive-access",
+                  "agent-new-connection", "agent-startup-edit", "ai-attack-alert", "tamper-alert")
+
 def status():
     es = _entries()
     undone = {e.get("ref") for e in es if e["kind"] == "undone"}
-    shown = [e for e in es if e["kind"] in ("contained", "setting", "blocked", "flagged")]
+    shown = [e for e in es if e["kind"] in ("contained", "setting", "blocked", "flagged") + AI_ALERT_KINDS]
     if not shown and not os.path.exists(os.path.join(ROOT_DIR, "ledger.jsonl")):
         print("Nothing has needed action yet.")
     for e in shown[-30:]:
         tag = " (undone)" if e["id"] in undone else (f"   undo: leviathan undo {e['id']}" if "undo" in e else "")
+        if e["kind"] in AI_ALERT_KINDS:
+            what = "; ".join(e["details"]) if isinstance(e.get("details"), list) else " ".join(
+                str(e[k]) for k in ("agent", "pid", "host", "path", "reason") if e.get(k))
+            print(f"#{e['id']} {e['time'][:16]} AI alert, {e['kind']}: {what[:300]}")
+            continue
         print(f"#{e['id']} {e['time'][:16]} {e['kind']}: {e.get('path') or e.get('setting') or e.get('what')} {('- ' + e['reason']) if e.get('reason') else ''}{tag}")
     if not IS_ROOT:
         rs = _entries(os.path.join(ROOT_DIR, "ledger.jsonl"))

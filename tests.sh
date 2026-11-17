@@ -2,7 +2,7 @@
 # Leviathan tests. Uses a throwaway folder; changes no system settings.
 PY=/opt/homebrew/bin/python3; SRC="$(cd "$(dirname "$0")" && pwd)"
 T=$(mktemp -d); export LEVIATHAN_STATE="$T/state" LEVIATHAN_DOWNLOADS="$T/dl" LEVIATHAN_QUIET=1 LEVIATHAN_NO_SPAWN=1
-export LEVIATHAN_PERSIST_DIRS="$T/agents"; mkdir -p "$LEVIATHAN_STATE" "$LEVIATHAN_DOWNLOADS" "$T/agents" "$T/.hidden"
+export LEVIATHAN_DRY_PAUSE=1 LEVIATHAN_PERSIST_DIRS="$T/agents"; mkdir -p "$LEVIATHAN_STATE" "$LEVIATHAN_DOWNLOADS" "$T/agents" "$T/.hidden"
 M="$PY $SRC/leviathan.py"; pass=0; fail=0
 ok() { if eval "$2"; then echo "PASS $1"; pass=$((pass+1)); else echo "FAIL $1"; fail=$((fail+1)); fi; }
 
@@ -276,6 +276,14 @@ ok "monitor second run (crontab compare) runs" '$M agents monitor >/dev/null 2>&
 $M mode agents off >/dev/null
 MH=$(mktemp -d); mkdir -p "$MH/.claude"; echo '{"mcpServers":{"a":{"command":"x"}},"projects":{"/p/proj":{"mcpServers":{"b":{"command":"y"}}}}}' > "$MH/.claude.json"
 ok "mcp: finds servers in .claude.json and projects" "[ \"$(lp "sorted(P.claude_mcp_servers('$MH'))")\" = \"['claude:a', 'claude:proj/b']\" ]"
+
+# 8z2. 2.0.6: program paths with spaces, a stray non-program file, AI alerts in status
+SPD="$T/Application Support/x.app/Contents/MacOS"; mkdir -p "$SPD"; printf '#!/bin/sh\n' > "$SPD/claude"; chmod +x "$SPD/claude"; touch "$T/Application"
+ok "parse_ps rejoins a path with spaces" "[ \"\$(lp \"P.parse_ps('7 $T/Application Support/x.app/Contents/MacOS/claude --flag')[0][1]\")\" = \"['$T/Application Support/x.app/Contents/MacOS/claude', '--flag']\" ]"
+ok "parse_ps leaves normal commands alone" "[ \"\$(lp \"P.parse_ps('8 /bin/ls -la')[0][1]\")\" = \"['/bin/ls', '-la']\" ]"
+ok "tripwire never freezes during tests" '$M agents tripped | grep -qv "was paused"'
+$PY -c "import sys; sys.path.insert(0,'$SRC'); import leviathan as L; L.ledger_add('canary-trigger', details=['Decoy aws_credentials was read'])"
+ok "status shows AI alerts" '$M status | grep -q "AI alert, canary-trigger: Decoy aws_credentials was read"'
 
 # agent matching
 am() { $PY -c "import sys; sys.path.insert(0,\"$SRC\"); import levplus as P; print(bool(P._is_agent_process(sys.argv[1:])))" "$@"; }
