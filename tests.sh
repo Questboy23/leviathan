@@ -249,6 +249,34 @@ ok "clip_check whitespace only" '[ -z "$(LEVIATHAN_CLIP_OLD=" " $M clip <<<"  " 
 ok "seed_phrase empty" 'echo "" | $PY -c "import sys;sys.path.insert(0,\"$SRC\");import levplus;print(levplus.seed_phrase(sys.stdin.read()))" | grep -q False'
 ok "seed_phrase 24 words valid" 'echo "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about" | $PY -c "import sys;sys.path.insert(0,\"$SRC\");import levplus;print(levplus.seed_phrase(sys.stdin.read()))" | grep -q True'
 
+# 8z. AI safety fixes (2.0.5)
+lp() { $PY -c "import sys; sys.path.insert(0,\"$SRC\"); import levplus as P; print($1)"; }
+ok "bypass: current key found" "[ \"\$(lp 'bool(P.claude_bypass({\"permissions\":{\"defaultMode\":\"bypassPermissions\"}}))')\" = True ]"
+ok "bypass: old key found" "[ \"\$(lp 'bool(P.claude_bypass({\"bypassPermissions\":True}))')\" = True ]"
+ok "bypass: normal mode clean" "[ \"\$(lp 'bool(P.claude_bypass({\"permissions\":{\"defaultMode\":\"default\"}}))')\" = False ]"
+ok "bypass: junk input clean" "[ \"\$(lp 'bool(P.claude_bypass([]))')\" = False ]"
+ok "codex: full access found" "[ \"\$(lp 'bool(P.codex_full_access(\"approval_policy = \\\"never\\\"\"))')\" = True ]"
+ok "codex: on-request clean" "[ \"\$(lp 'bool(P.codex_full_access(\"approval_policy = \\\"on-request\\\"\"))')\" = False ]"
+ok "listeners: loopback left out" "[ \"\$(lp 'P.parse_listeners(\"p1\\ncfoo\\nn127.0.0.1:631\\nn[::1]:5\\nn*:7000\")')\" = \"[('1', 'foo', '*:7000')]\" ]"
+ok "listeners: empty input" "[ \"\$(lp 'P.parse_listeners(\"\")')\" = '[]' ]"
+$M agents canary on >/dev/null
+CODE=$(grep Canary "$HOME/.leviathan-canary/aws_credentials" | awk '{print $3}')
+ok "decoy has a real code" '[ ${#CODE} = 16 ] && [ "$CODE" != unknown ]'
+ok "decoy code is in the fake key" 'grep -q "AKIA$CODE" "$HOME/.leviathan-canary/aws_credentials"'
+ok "whois finds the code" '$M agents whois "$CODE" | grep -q "was written"'
+ok "whois finds the code inside a leaked key" '$M agents whois "AKIA$CODE" | grep -q "was written"'
+ok "whois unknown code" '$M agents whois 0000 | grep -q "No decoy code"'
+sleep 2; cat "$HOME/.leviathan-canary/wallet_seed.txt" >/dev/null
+ok "decoy read detected" '$M agents canary | grep -q "wallet_seed.txt was read"'
+ok "decoy read reported once" '! $M agents canary | grep -q "wallet_seed.txt was read"'
+ok "monitor idle while mode off" '$M agents monitor | grep -q "mode is off"'
+$M mode agents on >/dev/null
+ok "monitor runs with mode on" '$M agents monitor >/dev/null 2>&1'
+ok "monitor second run (crontab compare) runs" '$M agents monitor >/dev/null 2>&1'
+$M mode agents off >/dev/null
+MH=$(mktemp -d); mkdir -p "$MH/.claude"; echo '{"mcpServers":{"a":{"command":"x"}},"projects":{"/p/proj":{"mcpServers":{"b":{"command":"y"}}}}}' > "$MH/.claude.json"
+ok "mcp: finds servers in .claude.json and projects" "[ \"$(lp "sorted(P.claude_mcp_servers('$MH'))")\" = \"['claude:a', 'claude:proj/b']\" ]"
+
 # agent matching
 am() { $PY -c "import sys; sys.path.insert(0,\"$SRC\"); import levplus as P; print(bool(P._is_agent_process(sys.argv[1:])))" "$@"; }
 ok "agent: claude cli" "[ \"\$(am /Users/x/.local/bin/claude -p hi)\" = True ]"

@@ -1012,11 +1012,9 @@ def main():
             else:
                 print("Usage: leviathan agents export --jsonl")
         elif len(a) > 1 and a[1] == "monitor":
-            # Run level 2 monitoring checks
-            LP._agent_monitor_sensitive_access()
-            LP._agent_monitor_new_connections()
-            LP._agent_monitor_startup_edits()
-            print("Monitoring checks done.")
+            print(LP.agents_monitor())
+        elif len(a) > 1 and a[1] == "whois":
+            print(LP.agents_whois(a[2]) if len(a) > 2 else "Usage: leviathan agents whois <code>")
         else:
             procs = LP.agent_procs() if LP else []
             for pid, name in procs:

@@ -56,7 +56,13 @@ curl -fsSL --max-time 90 https://raw.githubusercontent.com/hagezi/dns-blocklists
 
 # baseline: record what's already here so only new things get judged
 "$PY" "$S/bin/leviathan.py" scan-all
-for j in watch weekly persistwatch; do launchctl bootout gui/$U "$LA/com.leviathan.$j.plist" 2>/dev/null || true; launchctl bootstrap gui/$U "$LA/com.leviathan.$j.plist"; done
+cat > "$LA/com.leviathan.agentwatch.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>Label</key><string>com.leviathan.agentwatch</string>
+<key>ProgramArguments</key><array><string>$PY</string><string>$S/bin/leviathan.py</string><string>agents</string><string>monitor</string></array>
+<key>StartInterval</key><integer>300</integer><key>ThrottleInterval</key><integer>60</integer><key>LowPriorityIO</key><true/><key>Nice</key><integer>10</integer></dict></plist>
+EOF
+for j in watch weekly persistwatch agentwatch; do launchctl bootout gui/$U "$LA/com.leviathan.$j.plist" 2>/dev/null || true; launchctl bootstrap gui/$U "$LA/com.leviathan.$j.plist"; done
 
 # Menu bar app: build it when swiftc exists, else use the prebuilt copy the release zip ships
 APP_SRC=""
