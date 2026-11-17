@@ -58,12 +58,15 @@ curl -fsSL --max-time 90 https://raw.githubusercontent.com/hagezi/dns-blocklists
 "$PY" "$S/bin/leviathan.py" scan-all
 for j in watch weekly persistwatch; do launchctl bootout gui/$U "$LA/com.leviathan.$j.plist" 2>/dev/null || true; launchctl bootstrap gui/$U "$LA/com.leviathan.$j.plist"; done
 
-# Build and install menubar app if swiftc exists
-if command -v swiftc >/dev/null 2>&1; then
-    echo "Building menu bar app..."
-    cd "$SRC/menubar"
-    if bash build.sh 2>/dev/null; then
-        APP_SRC="$SRC/menubar/build/Leviathan Bar.app"
+# Menu bar app: build it when swiftc exists, else use the prebuilt copy the release zip ships
+APP_SRC=""
+if command -v swiftc >/dev/null 2>&1 && (cd "$SRC/menubar" && bash build.sh >/dev/null 2>&1); then
+    APP_SRC="$SRC/menubar/build/Leviathan Bar.app"
+elif [ -d "$SRC/menubar/prebuilt/Leviathan Bar.app" ]; then
+    APP_SRC="$SRC/menubar/prebuilt/Leviathan Bar.app"
+    xattr -dr com.apple.quarantine "$APP_SRC" 2>/dev/null || true
+fi
+if [ -n "$APP_SRC" ]; then
         APP_DST="$HOME/Applications/Leviathan Bar.app"
         mkdir -p "$HOME/Applications"
         rm -rf "$APP_DST"
@@ -83,10 +86,7 @@ EOF
         launchctl bootstrap gui/$U "$LA/com.leviathan.bar.plist"
         echo "Menu bar app LaunchAgent installed."
     else
-        echo "  (menu bar app build failed; skipping)"
-    fi
-else
-    echo "swiftc not found; skipping menu bar app build."
+        echo "  (menu bar app unavailable: no swiftc and no prebuilt copy; the protection still runs)"
 fi
 
 if [ -z "$LEVIATHAN_SKIP_ROOT" ]; then

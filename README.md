@@ -7,7 +7,7 @@
 
 **Leviathan stops viruses before they run on your Mac.** It moves real malware where it can't run, blocks scam and malware sites in every app, and stops the "paste this command" trick. It stays silent the rest of the time, and every action can be undone.
 
-Version 2.0.3. 104 of 104 tests pass on macOS 26 (Apple silicon).
+Version 2.0.4. 104 of 104 tests pass on macOS 26 (Apple silicon).
 
 ## Install
 
@@ -23,7 +23,7 @@ You need a Mac and [Homebrew](https://brew.sh). Leviathan installs its 3 helpers
 2. Paste this line and press Return:
 
 ```
-cd ~ && curl -fsSL https://github.com/Questboy23/leviathan/archive/refs/tags/v2.0.3.tar.gz | tar xz && bash leviathan-2.0.3/install.sh
+cd ~ && curl -fsSL https://github.com/Questboy23/leviathan/archive/refs/tags/v2.0.4.tar.gz | tar xz && bash leviathan-2.0.4/install.sh
 ```
 
 3. Type your Mac password when asked. The screen shows no dots while you type. That is normal.
@@ -34,7 +34,8 @@ Done. It takes about 1 to 3 minutes.
 ### Zip install
 
 1. Click **Download the zip** above. Your Mac unzips it into Downloads.
-2. Open Terminal, type `bash ` (with a space), drag `install.sh` from the unzipped folder into the window, press Return.
+2. In the unzipped `Leviathan` folder, right-click `Install Leviathan.command` and choose **Open**. If macOS refuses, open System Settings, Privacy & Security, scroll down, click **Open Anyway**.
+3. Type your Mac password when asked. The zip includes a ready-built menu bar app, so Xcode tools are optional.
 
 ## What it does
 

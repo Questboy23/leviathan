@@ -27,6 +27,7 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
     var hasUnreadAlert: Bool = false
     let leviathanBin: String
     let pythonBin = "/usr/bin/python3"
+    let noNap = ProcessInfo.processInfo.beginActivity(options: [.userInitiatedAllowingIdleSystemSleep], reason: "menu bar guard")
 
     private override init() {
         if let envBin = ProcessInfo.processInfo.environment["LEVIATHAN_BIN"], !envBin.isEmpty {
@@ -52,6 +53,7 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
             button.action = #selector(statusItemClicked)
         }
         statusItem.menu = menu
+        updateMenu(installed: FileManager.default.fileExists(atPath: leviathanBin))  // an empty menu never opens, so the first click did nothing
         menu.delegate = self  // the button action never fires once a menu is attached; opening the menu clears the alert
     }
 
@@ -96,7 +98,7 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
     }
 
     func refreshStatus() {
-        DispatchQueue.global(qos: .utility).async { [weak self] in
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             self?.fetchLevelAndModes()
             self?.fetchAgentLevel()
             self?.fetchVPNStatus()
@@ -104,20 +106,21 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
     }
 
     func fetchLevelAndModes() {
-        var newLevel = 2
-        var newModes = ["crypto": false, "apps": false, "tor": false, "agents": false]
-        var installed = true
+        var newLevel = level
+        var newModes = modes
+        let installed = FileManager.default.fileExists(atPath: leviathanBin)
+        var failed = false
 
-        let levelResult = runCLI(["level", "--json"], timeout: 10)
+        let levelResult = runCLI(["level", "--json"], timeout: 30)
         if let data = levelResult.data(using: .utf8),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let lvl = json["level"] as? Int {
             newLevel = lvl
         } else {
-            installed = false
+            failed = true
         }
 
-        let modeResult = runCLI(["mode", "--json"], timeout: 10)
+        let modeResult = runCLI(["mode", "--json"], timeout: 30)
         if let data = modeResult.data(using: .utf8),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             for (key, value) in json {
@@ -126,9 +129,15 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
                 }
             }
         } else {
-            installed = false
+            failed = true
         }
 
+        if failed {  // keep the raw output so a failure is diagnosable
+            let log = "\(Date()) level=\(levelResult) mode=\(modeResult)\n"
+            let url = URL(fileURLWithPath: NSHomeDirectory() + "/.leviathan/bar.log")
+            if let h = try? FileHandle(forWritingTo: url) { h.seekToEndOfFile(); h.write(log.data(using: .utf8)!); try? h.close() }
+            else { try? log.write(to: url, atomically: true, encoding: .utf8) }
+        }
         DispatchQueue.main.async { [weak self] in
             self?.level = newLevel
             self?.modes = newModes
@@ -137,7 +146,7 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
     }
 
     func fetchAgentLevel() {
-        let result = runCLI(["agents", "level"], timeout: 10)
+        let result = runCLI(["agents", "level"], timeout: 30)
         if let line = result.split(separator: "\n").first,
            line.hasPrefix("Current agent level:") {
             let parts = line.split(separator: ":")
@@ -151,7 +160,7 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
     }
 
     func fetchVPNStatus() {
-        let result = runCLI(["vpn", "status"], timeout: 10)
+        let result = runCLI(["vpn", "status"], timeout: 30)
         let status = result.trimmingCharacters(in: .whitespacesAndNewlines)
         var clientFound = false
 
@@ -643,6 +652,7 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
     /// read before waiting, so a large output cannot block; the timeout really stops a stuck command.
     func runCLI(_ args: [String], timeout: TimeInterval = 10, stdin: String? = nil, exe: String? = nil) -> String {
         let process = Process()
+        process.qualityOfService = .userInitiated  // utility QoS + App Nap starved python for 10+ s, menu then said "not installed"
         process.executableURL = URL(fileURLWithPath: exe ?? pythonBin)
         process.arguments = exe == nil ? [leviathanBin] + args : args
         let out = Pipe()
@@ -664,10 +674,12 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
         let data = out.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         killer.cancel()
-        return String(data: data, encoding: .utf8) ?? ""
+        let text = String(data: data, encoding: .utf8) ?? ""
+        if text.isEmpty && exe == nil { return "exit=\(process.terminationStatus) reason=\(process.terminationReason.rawValue)" }
+        return text
     }
 
-    func runCLIAsync(_ args: [String], timeout: TimeInterval = 10, stdin: String? = nil, completion: @escaping (String) -> Void) {
+    func runCLIAsync(_ args: [String], timeout: TimeInterval = 30, stdin: String? = nil, completion: @escaping (String) -> Void) {
         DispatchQueue.global(qos: .utility).async {
             let result = self.runCLI(args, timeout: timeout, stdin: stdin)
             DispatchQueue.main.async {
