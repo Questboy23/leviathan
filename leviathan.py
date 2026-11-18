@@ -760,7 +760,7 @@ def full_scan():
             if level == "bad":
                 threats.append(f"{os.path.join(d, n)}: {why}")
     issues += _listeners()
-    for lvl, msg in sweep_system(False) + sweep_user(False):
+    for lvl, msg in sweep_user(False):  # includes the read-only system checks
         if lvl == "issue":
             issues.append(msg)
     print("\nThreats (things no one wants on their computer):")
@@ -772,7 +772,7 @@ def full_scan():
     if threats:
         print("\nRemove a threat so it can't run (undoable): leviathan contain PATH")
     if issues:
-        print("Fix the settings above automatically (undoable): leviathan sweep --fix, then sudo \"%s\" sweep --fix" % ROOT_TOOL)
+        print("Fix the settings above that Leviathan can change (undoable): leviathan sweep --fix")
     return len(threats)
 
 
