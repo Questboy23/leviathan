@@ -15,6 +15,7 @@ PY="$P/bin/python3"
 mkdir -p "$S/bin" "$S/quarantine"; chmod 700 "$S"
 rm -f "$S/bin/bip39.txt" "$S/bin/dnswatch.sh" "$S/bin/install-root.sh" "$S/bin/fix-filter.command" "$S/bin/fix-filter.sh"  # parts of older versions
 cp "$SRC/leviathan.py" "$SRC/levplus.py" "$SRC/uninstall.sh" "$SRC/website-filter.mobileconfig" "$S/bin/"
+mkdir -p "$S/bin/safebox"; cp "$SRC/safebox/leviathan-safebox" "$SRC/safebox/launcher.c" "$S/bin/safebox/"
 for g in bash zsh; do sed "s#__PY__#$PY#g" "$SRC/guard.$g" > "$S/bin/guard.$g"; done
 chmod +x "$S/bin/leviathan.py"; touch "$S/ledger.jsonl"; chmod 600 "$S/ledger.jsonl"
 mkdir -p "$HOME/.local/bin"; rm -f "$HOME/.local/bin/leviathan"
@@ -39,7 +40,7 @@ EOF
 cat > "$LA/com.leviathan.weekly.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict><key>Label</key><string>com.leviathan.weekly</string>
-<key>ProgramArguments</key><array><string>$PY</string><string>$S/bin/leviathan.py</string><string>sweep</string><string>--fix</string><string>--quiet</string></array>
+<key>ProgramArguments</key><array><string>$PY</string><string>$S/bin/leviathan.py</string><string>refresh</string></array>
 <key>StartCalendarInterval</key><dict><key>Weekday</key><integer>0</integer><key>Hour</key><integer>11</integer><key>Minute</key><integer>17</integer></dict></dict></plist>
 EOF
 
@@ -64,7 +65,16 @@ cat > "$LA/com.leviathan.agentwatch.plist" <<EOF
 <key>ProgramArguments</key><array><string>$PY</string><string>$S/bin/leviathan.py</string><string>agents</string><string>monitor</string></array>
 <key>StartInterval</key><integer>300</integer><key>ThrottleInterval</key><integer>60</integer><key>LowPriorityIO</key><true/><key>Nice</key><integer>10</integer></dict></plist>
 EOF
-for j in watch weekly persistwatch agentwatch; do launchctl bootout gui/$U "$LA/com.leviathan.$j.plist" 2>/dev/null || true; launchctl bootstrap gui/$U "$LA/com.leviathan.$j.plist"; done
+# vpnwatch: turns the VPN on or off each time the Mac joins a network
+cat > "$LA/com.leviathan.vpnwatch.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>Label</key><string>com.leviathan.vpnwatch</string>
+<key>ProgramArguments</key><array><string>$PY</string><string>$S/bin/leviathan.py</string><string>vpn</string><string>check</string></array>
+<key>WatchPaths</key><array><string>/Library/Preferences/SystemConfiguration</string></array>
+<key>ThrottleInterval</key><integer>10</integer><key>LowPriorityIO</key><true/><key>Nice</key><integer>10</integer></dict></plist>
+EOF
+[ -f "$S/vpn.json" ] || "$PY" "$S/bin/leviathan.py" vpn trust >/dev/null  # the network you install on (usually home) is trusted
+for j in watch weekly persistwatch agentwatch vpnwatch; do launchctl bootout gui/$U "$LA/com.leviathan.$j.plist" 2>/dev/null || true; launchctl bootstrap gui/$U "$LA/com.leviathan.$j.plist"; done
 
 # Menu bar app: build it when swiftc exists, else use the prebuilt copy the release zip ships
 APP_SRC=""
@@ -98,7 +108,6 @@ EOF
 fi
 
 echo; echo "Settings check:"
-"$PY" "$S/bin/leviathan.py" sweep --fix
 if ! "$PY" -c "import sys; sys.path.insert(0, '$S/bin'); import leviathan as L; sys.exit(L.website_filter_on() is False)"; then
   echo; echo "Last step: the website filter. System Settings opens; click Install there (it asks for your Mac password)."
   [ -z "$LEVIATHAN_NO_PROFILE" ] && open "$S/bin/website-filter.mobileconfig" && open "x-apple.systempreferences:com.apple.Profiles-Settings.extension"

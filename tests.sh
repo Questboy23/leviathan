@@ -182,13 +182,61 @@ ok "base64 inside sh -c is stopped" '[ -n "$($M check-cmd "bash -c \"\$(echo Y3V
 echo x > "$T/rel.txt"
 ok "contain with a relative path stores the full path" '(cd "$T" && $M contain rel.txt >/dev/null) && grep -q "\"path\": \"/[^\"]*/rel.txt\"" "$LEVIATHAN_STATE/ledger.jsonl"'
 ok "contain a missing file says so" '$M contain /nonexistent/zz 2>&1 | grep -q "No such file"'
-for c in level clip cost sandbox snapshot diff tor wallets "ai tuneup" "agents tripped" "agents run" "agents export"; do
+for c in level clip cost sandbox snapshot diff tor wallets "ai tuneup" "agents export" sweep fix-chrome-notify undo-settings; do
   ok "removed command: $c" "! \$M $c x >/dev/null 2>&1"
 done
 ok "only the agents mode exists" '! $M mode crypto on >/dev/null 2>&1 && $M mode agents off | grep -q "agents watch: off"'
 ok "website filter check answers" '$PY -c "import sys; sys.path.insert(0,\"$SRC\"); import leviathan as L; r=L.website_filter_report(); sys.exit(r[0] not in (\"ok\",\"issue\"))"'
-ok "filter profile is a valid plist with Cloudflare security DNS" 'plutil -lint "$SRC/website-filter.mobileconfig" >/dev/null && grep -q "security.cloudflare-dns.com" "$SRC/website-filter.mobileconfig"'
+ok "filter profile is a valid plist with Quad9 DNS" 'plutil -lint "$SRC/website-filter.mobileconfig" >/dev/null && grep -q "dns.quad9.net" "$SRC/website-filter.mobileconfig"'
 ok "empty output from a successful command shows nothing" '! grep -q "reason=" "$SRC/menubar/LeviathanBar.swift"'
+
+# 3.0 Safe Box: a downloaded app Apple never checked opens boxed; undo puts it back
+mkapp() { mkdir -p "$1/Contents/MacOS"; printf '<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleExecutable</key><string>x</string></dict></plist>' > "$1/Contents/Info.plist"; printf '#!/bin/sh\nsleep 1\n' > "$1/Contents/MacOS/x"; chmod +x "$1/Contents/MacOS/x"; }
+mkapp "$T/dl/Cracked.app"; xattr -w com.apple.quarantine "0081;0;Safari;" "$T/dl/Cracked.app"; mkapp "$T/dl/Mine.app"
+$M scan-downloads >/dev/null
+ok "downloaded unsigned app is put in the Safe Box" '[ -x "$T/dl/Cracked.app/Contents/MacOS/leviathan-safebox" ] && [ -d "$LEVIATHAN_STATE/safebox/Cracked/app/Cracked.app" ]'
+ok "an app you made yourself is left alone" '[ -x "$T/dl/Mine.app/Contents/MacOS/x" ]'
+ok "launcher points at the boxed app" 'grep -q "safebox open --exec .*Cracked/app/Cracked.app" "$T/dl/Cracked.app/Contents/Resources/run.sh"'
+SBID=$(grep '"safeboxed"' "$LEVIATHAN_STATE/ledger.jsonl" | tail -1 | $PY -c "import json,sys; print(json.loads(sys.stdin.read())['id'])")
+$M undo "$SBID" >/dev/null
+ok "undo takes the app out of the Safe Box" '[ -x "$T/dl/Cracked.app/Contents/MacOS/x" ] && [ ! -e "$T/dl/Cracked.app/Contents/MacOS/leviathan-safebox" ]'
+mkdir -p "$T/box"; $PY -c "import sys; sys.path.insert(0,'$SRC'); import leviathan as L; open('$T/sb.sb','w').write(L.safebox_profile(L.HOME, '$T/box', '$T/dl/Mine.app'))"
+ok "Safe Box: your home folder and SSH keys are closed" '! /usr/bin/sandbox-exec -f "$T/sb.sb" /bin/ls "$HOME/.ssh" >/dev/null 2>&1 && ! /usr/bin/sandbox-exec -f "$T/sb.sb" /bin/cat "$HOME/.zshrc" >/dev/null 2>&1'
+ok "Safe Box: password boxes and the keychain tool are blocked" '! /usr/bin/sandbox-exec -f "$T/sb.sb" /usr/bin/osascript -e 1 >/dev/null 2>&1 && ! /usr/bin/sandbox-exec -f "$T/sb.sb" /usr/bin/security list-keychains >/dev/null 2>&1'
+ok "Safe Box: the app can use its own folder" '/usr/bin/sandbox-exec -f "$T/sb.sb" /usr/bin/touch "$T/box/ok"'
+
+# 3.0 VPN: driven through a stand-in warp-cli that records what it is told
+mkdir -p "$T/bin"
+cat > "$T/bin/warp-cli" <<EOF
+#!/bin/sh
+shift
+echo "\$*" >> "$T/warp.log"
+case "\$1" in
+  status) if [ -f "$T/warp.on" ]; then echo "Status update: Connected"; else echo "Status update: Disconnected"; fi;;
+  connect) touch "$T/warp.on";;
+  disconnect) rm -f "$T/warp.on";;
+  registration) [ "\$2" = show ] && exit 1;;
+esac
+exit 0
+EOF
+chmod +x "$T/bin/warp-cli"
+V() { PATH="$T/bin:$PATH" $M vpn "$@"; }
+V auto >/dev/null
+ok "VPN connects on a network you have not trusted" '[ -f "$T/warp.on" ] && grep -q "registration new" "$T/warp.log"'
+ok "VPN keeps legal sites open (no Cloudflare family filter)" 'grep -q "dns families off" "$T/warp.log"'
+V trust >/dev/null
+ok "VPN turns off on a trusted network" '[ ! -f "$T/warp.on" ]'
+V untrust >/dev/null; V off >/dev/null
+ok "VPN off stays off" '[ ! -f "$T/warp.on" ] && grep -q "\"mode\": \"off\"" "$LEVIATHAN_STATE/vpn.json"'
+ok "VPN status without WARP says how to install it" 'PATH=/usr/bin:/bin $M vpn status | grep -q "brew install --cask cloudflare-warp"'
+
+# 3.0 AI safety: tripwire, report, agent box
+ok "decoy carries the planted instruction" '$M agents canary on >/dev/null && grep -q "leviathan agents tripped" "$T/canary/aws_credentials"'
+ok "tripwire runs and never freezes during tests" '$M agents tripped | grep -q "would be paused\|no AI agent started"'
+ok "report shares events with your home folder hidden" '! $M agents report --jsonl | grep -q "$HOME/"'
+mkdir -p "$T/proj"
+ok "agent box: project is writable" '(cd "$T/proj" && $M agents run -- /usr/bin/touch made.txt) && [ -f "$T/proj/made.txt" ]'
+ok "agent box: SSH keys and Documents are closed" '(cd "$T/proj" && ! $M agents run -- /bin/ls "$HOME/.ssh" >/dev/null 2>&1 && ! $M agents run -- /bin/ls "$HOME/Documents" >/dev/null 2>&1)'
 
 # agent matching
 am() { $PY -c "import sys; sys.path.insert(0,\"$SRC\"); import levplus as P; print(bool(P._is_agent_process(sys.argv[1:])))" "$@"; }

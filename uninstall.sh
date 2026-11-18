@@ -2,9 +2,9 @@
 # Removes Leviathan completely and reverses every setting it changed.
 # Keeps ~/.leviathan/quarantine and the log so nothing it caught is lost. Add --keep-settings to leave settings as they are.
 S="$HOME/.leviathan"; U=$(id -u); LA="$HOME/Library/LaunchAgents"; R="/Library/Application Support/Leviathan"
-for j in watch weekly persistwatch agentwatch bar; do launchctl bootout gui/$U "$LA/com.leviathan.$j.plist" 2>/dev/null; rm -f "$LA/com.leviathan.$j.plist"; done
+for j in watch weekly persistwatch agentwatch vpnwatch bar; do launchctl bootout gui/$U "$LA/com.leviathan.$j.plist" 2>/dev/null; rm -f "$LA/com.leviathan.$j.plist"; done
 PY=$(sed -n 's/^exec "\([^"]*\)".*/\1/p' "$HOME/.local/bin/leviathan" 2>/dev/null)
-[ "$1" != "--keep-settings" ] && [ -x "$PY" ] && "$PY" "$S/bin/leviathan.py" undo-settings
+[ "$1" != "--keep-settings" ] && [ -x "$PY" ] && "$PY" "$S/bin/leviathan.py" undo-all
 # versions before 2.1 ran a site filter as administrator; remove it if it is still there
 if [ -e /Library/LaunchDaemons/com.leviathan.dnscrypt.plist ] || [ -d "$R" ]; then
   echo "Removing the old website filter (asks for your Mac password)."

@@ -112,6 +112,10 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
         add("Resume all AI agents", #selector(resumeAgents))
         add("AI safety check", #selector(runAISafety))
         menu.addItem(NSMenuItem.separator())
+        let vpn = add("VPN on untrusted Wi-Fi", #selector(toggleVPN))
+        vpn.state = vpnMode() == "off" ? .off : .on
+        add("Trust this network (no VPN here)", #selector(trustNetwork))
+        menu.addItem(NSMenuItem.separator())
         add("Check installer…", #selector(checkInstaller))
         add("Recent activity", #selector(showRecentActivity))
         add("Run full scan", #selector(runFullScan))
@@ -139,18 +143,33 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
         runCLIAsync(["agents", "resume"]) { [weak self] output in self?.showResult("Resume agents", output) }
     }
 
+    /// Reads ~/.leviathan/vpn.json directly so the menu opens with no Python call.
+    func vpnMode() -> String {
+        let url = URL(fileURLWithPath: NSHomeDirectory() + "/.leviathan/vpn.json")
+        guard let d = try? Data(contentsOf: url), let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return "auto" }
+        return j["mode"] as? String ?? "auto"
+    }
+
+    @objc func toggleVPN() {
+        runCLIAsync(["vpn", vpnMode() == "off" ? "auto" : "off"], timeout: 60) { [weak self] output in self?.showResult("VPN", output) }
+    }
+
+    @objc func trustNetwork() {
+        runCLIAsync(["vpn", "trust"], timeout: 60) { [weak self] output in self?.showResult("VPN", output) }
+    }
+
     @objc func runAISafety() {
         runCLIAsync(["ai", "safety"], timeout: 60) { [weak self] output in self?.showResult("AI safety check", output) }
     }
 
-    /// The filter is on when this Mac's DNS answers 0.0.0.0 for Cloudflare's malware test name. Checked every 5 minutes off the main thread.
+    /// The filter is on when this Mac's DNS is Quad9: only Quad9 answers on.quad9.net with 216.21.3.77. Checked every 5 minutes off the main thread.
     func startFilterCheck() {
         let t = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
         t.schedule(deadline: .now() + 2, repeating: 300.0)
         t.setEventHandler { [weak self] in
             guard let self = self else { return }
-            let out = self.runCLI(["-q", "host", "-a", "name", "malware.testcategory.com"], timeout: 10, exe: "/usr/bin/dscacheutil")
-            let on: Bool? = out.contains("0.0.0.0") ? true : (out.contains("ip_address") ? false : nil)
+            let out = self.runCLI(["-q", "host", "-a", "name", "on.quad9.net"], timeout: 10, exe: "/usr/bin/dscacheutil")
+            let on: Bool? = out.contains("216.21.3.77") ? true : (out.contains("ip_address") ? false : nil)
             DispatchQueue.main.async { self.filterOn = on }
         }
         t.resume()

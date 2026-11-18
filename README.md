@@ -5,9 +5,9 @@
 
 # Leviathan
 
-**Leviathan stops viruses before they run on your Mac.** It moves real malware where it can't run, blocks scam and malware sites in every app, and stops the "paste this command" trick. It stays silent the rest of the time, and every action can be undone.
+**Leviathan does three jobs on your Mac.** It stops viruses, including in cracked and pirated apps. It keeps AI agents like Claude Code and Codex away from your secrets. It turns on a free VPN on networks you don't trust. It stays silent the rest of the time, and every action can be undone.
 
-Version 2.1.1. 99 of 99 tests pass on macOS 26 (Apple silicon). Version 2.1 cut 9 features that rarely helped or did not work, and is about 40% smaller.
+Version 3.0.0. 117 of 117 tests pass on macOS 26 (Apple silicon). Version 3.0 removed the settings sweep, the Chrome fixes and the open-ports check, and added the Safe Box, the VPN, the agent box and the decoy tripwire.
 
 ## Install
 
@@ -23,7 +23,7 @@ You need a Mac and [Homebrew](https://brew.sh). Leviathan installs its 2 helpers
 2. Paste this line and press Return:
 
 ```
-cd ~ && curl -fsSL https://github.com/Questboy23/leviathan/archive/refs/tags/v2.1.1.tar.gz | tar xz && bash leviathan-2.1.1/install.sh
+cd ~ && curl -fsSL https://github.com/Questboy23/leviathan/archive/refs/tags/v3.0.0.tar.gz | tar xz && bash leviathan-3.0.0/install.sh
 ```
 
 3. If macOS asks whether `python3` may access Downloads, click Allow.
@@ -39,43 +39,63 @@ Done. It takes about 1 to 3 minutes.
 
 ## What it does
 
-| Watch | What it catches | What it does |
+### 1. Viruses, including cracked and pirated apps
+
+| Part | What it catches | What it does |
 |---|---|---|
+| Safe Box | Any downloaded app that Apple never checked (unsigned or not notarized), which covers most cracked and pirated apps | Moves the app into a box and leaves a launcher with the same name and icon in its place. The app opens as usual from Finder, the Dock and Launchpad. Inside the box it can't open your home folder, SSH keys, browser data, keychains, wallets, Mail or Messages. It can't show a password box, use the keychain tool, use sudo, or set itself to start at login. Its own settings and saves stay in its box. `leviathan undo N` takes it out. |
 | Downloads and apps | Files matching Apple's own malware rules (XProtect), apps whose developer Apple revoked, files downloaded from known malware sites | Moves them to a folder where they can't run. `leviathan undo` puts them back for 7 days. |
 | Auto-start items | Programs that set themselves to start at login while pretending to be Apple, or hiding unsigned in a secret folder | Switches them off and moves them out. Undoable. |
 | Paste guard | Pasted Terminal commands that download and run code, unscramble hidden code and run it, strip Apple's safety check, or draw a fake password box | Stops the command once and says why. Press Enter again to run it anyway. |
-| Fake password boxes | Pop-ups that ask for your password with hidden typing (AppleScript, compiled scripts, JavaScript) | Closes them. One you type yourself at a Terminal prompt is allowed. |
-| Website filter | Known malware and phishing sites, through Cloudflare's security DNS (1.1.1.2), encrypted | The site never loads, in any app. It is a standard macOS profile: remove it any time in System Settings. |
-| Settings | AirDrop open to everyone, Chrome notification spam and hijacked search | Fixes them. Undoable. Also reports firewall, Apple's app checks, updates, disk encryption and settings profiles. |
-| AI agents (opt in) | Claude Code, Codex and other AI agents | Lists them and pauses or resumes all at once. With "Watch AI agents" on, decoy secret files are checked every 5 minutes and a read notifies you with the agents running. Warns when an agent is set to run commands without asking. |
+| Fake password boxes | Pop-ups that ask for your password with hidden typing | Closes them. |
+| Website filter | Known malware and phishing sites, through Quad9 DNS (9.9.9.9), encrypted. Legal sites, adult ones included, stay open | The site never loads, in any app. It is a standard macOS profile: remove it any time in System Settings. |
 | Is this a virus? | `leviathan check File`, `leviathan pkg File.pkg` | Answers in plain words, and shows what an installer's scripts will do before you run it. |
+
+### 2. AI agents
+
+| Part | What it does |
+|---|---|
+| Agent box | `leviathan agents run -- claude` (or `codex`, or any agent) runs the agent so it can work on the current project folder and its own settings, and nothing else in your home folder. SSH keys, browser data, keychains, wallets, Documents, Desktop and the decoy files are closed. SSH to other computers is blocked. GitHub, AWS and SSH-agent tokens are removed from its environment. |
+| Decoy files and tripwire | With "Watch AI agents" on, fake AWS keys and a fake wallet sit in `~/.leviathan-canary`. One decoy carries a planted instruction. An agent that obeys text it finds in files runs `leviathan agents tripped`, which pauses that exact agent and logs which one obeyed. Any read of a decoy is logged with the agents running at that moment. |
+| Secret folder watch | Every 5 minutes, it checks whether an agent or a program it started has a secret folder open, and logs it. |
+| Pause and resume | Freezes every AI agent at once from the menu, and unfreezes them. Nothing is lost. |
+| AI safety check | Flags Claude bypass-permissions mode, Codex full access, and new MCP servers or skills. |
+| Report for researchers | `leviathan agents report --jsonl` prints every agent event (decoy reads, tripwire hits, secret-folder opens, boxed runs) one per line, with your home folder shown as `~`. Prompt-injection obedience measured on real machines, in a format you can share. |
+
+### 3. VPN on networks you don't trust
+
+Leviathan drives Cloudflare WARP, which is free. Each time your Mac joins a network, it checks the router's hardware address. On a network you trusted (the one you installed on is trusted at install), the VPN stays off. Everywhere else, such as cafes, hotels, airports and school Wi-Fi, it turns on by itself. The menu has "VPN on untrusted Wi-Fi" and "Trust this network". `leviathan vpn status` checks with Cloudflare that your traffic really goes through the VPN.
+
+WARP needs a one-time install with your password: `brew install --cask cloudflare-warp`.
 
 The menu bar shield is white while idle, green while a scan runs, orange on an alert you have not seen. It opens instantly. Copying text never triggers anything.
 
-**It only acts on things no one wants on their computer.** Unsigned apps, cracked apps and homemade scripts are never blocked or labeled. They still get checked for actual malware.
+**Nothing leaves your Mac** except website lookups (sent encrypted to Quad9), VPN traffic when WARP is on, and a weekly list download.
 
-**Nothing leaves your Mac** except website lookups (sent encrypted to Cloudflare once the filter is on) and a weekly list download.
+### Removed in 3.0
 
-### Removed in 2.1
-
-Levels 1 to 5 and the crypto, untrusted-apps and Tor modes (they switched nothing on), the clipboard guard, wallet check, Tor check, app sandbox, snapshots, AI Tune-up, the decoy tripwire and code lookup, the AI attack, tamper and new-connection alerts (they fired on normal use), and the old website filter (it needed a background job running as administrator, and on the test Mac it never got installed).
+The settings sweep (firewall, AirDrop, updates and FileVault report), the Chrome notification and search-engine fixes, and the open-ports check. Setting changes made by older versions are still undone by `uninstall.sh`.
 
 ## Use
 
 ```
-leviathan scan        check everything now: apps, Downloads, auto-start, network openings, settings
-leviathan             show everything it did, with an undo number for each
-leviathan undo 12     undo entry 12
-leviathan verify      check that the log has not been edited
+leviathan scan                    check apps, Downloads, auto-start items and the website filter now
+leviathan                         show everything it did, with an undo number for each
+leviathan undo 12                 undo entry 12
+leviathan safebox wrap App.app    put any app in the Safe Box yourself
+leviathan agents run -- claude    run an AI agent in the agent box
+leviathan vpn [on|off|auto|trust] VPN always on, off, or automatic (the default)
+leviathan verify                  check that the log has not been edited
 ```
-
-`leviathan scan` changes nothing. On the test Mac it checked 50 apps and 29 downloads in 76 seconds.
 
 ## What it can't do
 
 - **A brand-new flaw in macOS itself** can be attacked without you doing anything. Only Apple's updates fix those.
 - **Malware no list knows yet** gets through the download check. The paste guard and fake password box watch still catch the most common way Mac password stealers get in.
-- **The website filter** blocks what Cloudflare knows. A hotel Wi-Fi login page may not open while it is on; remove the profile for a moment, or use the login page's IP address.
+- **The website filter** blocks what Quad9 knows. A hotel Wi-Fi login page may not open while it is on; remove the profile for a moment, or use the login page's IP address.
+- **The Safe Box** keeps an app away from your files. It does not stop the app from reading what is on screen, what you copy, or what you type into it, and an app can still draw its own fake login window. Apps that need your Documents folder can't see it inside the box: undo to take a trusted app out.
+- **The dark web**: the VPN hides your traffic from the local network, and the Safe Box contains downloads, but nothing here makes Tor or a hidden service safe to trust.
+- **The agent box** uses macOS `sandbox-exec`, which Apple marks as deprecated but still ships.
 - **Intel Macs** should work through Homebrew's `/usr/local` paths but were not tested.
 
 ## How it stays safe itself

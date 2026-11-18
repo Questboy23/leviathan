@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Leviathan: stops viruses before they run on a Mac. Every action is logged and undoable.
-Commands: scan | scan-downloads | scan-apps | scan-persist | sweep [--fix] | check-cmd CMD |
-          pwwatch | undo ID | undo-settings | status | verify | contain PATH | check PATH [--contain] |
-          purge | fix-chrome-notify"""
+"""Leviathan: stops viruses before they run on a Mac, keeps AI agents in check, and turns on a VPN on
+networks you don't trust. Every action is logged and undoable.
+Commands: scan | scan-downloads | scan-apps | scan-persist | check-cmd CMD | pwwatch | undo ID | status | verify |
+          contain PATH | check PATH [--contain] | purge | safebox open|wrap APP | safebox list |
+          vpn [on|off|auto|check|trust|untrust]"""
 import datetime, hashlib, json, os, plistlib, re, shlex, shutil, subprocess, sys, time
 
 os.umask(0o077)  # the log and quarantine are readable by you only
@@ -314,6 +315,8 @@ def undo(i):
         if not os.path.lexists(u["src"]):
             print(f"Entry {i} can't be undone: it was deleted after {KEEP_DAYS} days in quarantine.")
             return
+        if u.get("remove") and os.path.isdir(u["remove"]) and os.path.exists(os.path.join(u["remove"], "Contents/MacOS/leviathan-safebox")):
+            shutil.rmtree(u["remove"])  # only our own launcher, recognised by its executable name
         shutil.move(u["src"], u["dst"])
         for rel, m in u.get("modes", {}).items():
             p = u["dst"] if rel == "." else os.path.join(u["dst"], rel)
@@ -375,7 +378,10 @@ def scan_dir(folder, key, only_apps=False):
         if level == "bad":
             contain(p, why)
         elif level == "unverified" and not first:
-            note(p, why)
+            if p.endswith(".app") and quarantined(p) and safebox_wrap(p, why):
+                known[n] = str(os.stat(p).st_mtime)  # the launcher now at p is ours
+            else:
+                note(p, why)
     _save_seen(seen)
 
 
@@ -444,7 +450,7 @@ def scan_persist():
                     contain(p, why, after=[["launchctl", "bootstrap", f"gui/{uid}", p]])
                 else:
                     ledger_add("flagged", path=p, reason=why)
-                    notify(f"Found a threat that needs your password to remove: {n}. Run: sudo \"{ROOT_TOOL}\" contain '{p}'")
+                    notify(f"Found a threat that needs your password to remove: {n}. Drag it to the Trash and type your password when asked.")
             elif level == "unverified":
                 ledger_add("noticed", path=p, reason=why)
     _save_seen(seen)
@@ -531,27 +537,8 @@ def check_cmd(line):
 
 
 # ---------- settings sweep ----------
-def _read(argv):
-    return run(argv)[1].strip()
 
 
-def sweep_user(fix):
-    out = []
-    mode = _read(["defaults", "read", "com.apple.sharingd", "DiscoverableMode"])
-    if mode == "Everyone":
-        if fix:
-            run(["defaults", "write", "com.apple.sharingd", "DiscoverableMode", "-string", "Contacts Only"])
-            run(["killall", "sharingd"])
-            ledger_add("setting", setting="AirDrop: Everyone -> Contacts Only",
-                       undo={"type": "cmds", "argv": [["defaults", "write", "com.apple.sharingd", "DiscoverableMode", "-string", "Everyone"], ["killall", "sharingd"]]})
-        out.append(("fixed" if fix else "issue", "AirDrop was open to everyone; now contacts only"))
-    else:
-        out.append(("ok", "AirDrop limited"))
-    out += chrome_report()
-    out.append(website_filter_report())
-    out += [r for r in sweep_system(False) if not r[1].startswith("Disk encryption")]  # read-only: changing these needs your password
-    refresh_blocklist()
-    return out
 
 
 def refresh_blocklist():
@@ -570,16 +557,20 @@ def refresh_blocklist():
 
 
 def website_filter_on():
-    """True when this Mac's DNS blocks Cloudflare's malware test site, None when offline."""
+    """True when this Mac's DNS is Quad9 (the filter profile), None when offline.
+    Quad9 answers on.quad9.net with 216.21.3.77; every other resolver gets a different address."""
     import socket
     try:
-        return socket.gethostbyname("malware.testcategory.com") == "0.0.0.0"
+        return socket.gethostbyname("on.quad9.net") == QUAD9_ON_IP
     except OSError:
         try:
             socket.gethostbyname("apple.com")
-            return True  # the test name does not resolve at all: a stricter filter is blocking it
+            return False
         except OSError:
             return None
+
+
+QUAD9_ON_IP = "216.21.3.77"
 
 def website_filter_report():
     on = website_filter_on()
@@ -590,136 +581,20 @@ def website_filter_report():
     return ("issue", "Website filter is OFF. Turn it on: click the shield, then 'Turn on website filter', then Install in System Settings")
 
 
-def sweep_system(fix):
-    out = []
-    fw = _read(["/usr/libexec/ApplicationFirewall/socketfilterfw", "--getglobalstate"])
-    if "disabled" in fw.lower():
-        if fix:
-            run(["/usr/libexec/ApplicationFirewall/socketfilterfw", "--setglobalstate", "on"])
-            run(["/usr/libexec/ApplicationFirewall/socketfilterfw", "--setallowsigned", "on"])
-            run(["/usr/libexec/ApplicationFirewall/socketfilterfw", "--setallowsignedapp", "on"])
-            ledger_add("setting", root=True, setting="Firewall: off -> on",
-                       undo={"type": "cmd", "argv": ["/usr/libexec/ApplicationFirewall/socketfilterfw", "--setglobalstate", "off"]})
-        out.append(("fixed" if fix else "issue", "Firewall was off" if fix else "Firewall is off (System Settings > Network > Firewall)"))
-    else:
-        out.append(("ok", "Firewall on"))
-    if "disabled" in _read(["spctl", "--status"]):
-        if fix:
-            run(["spctl", "--global-enable"])
-            ledger_add("setting", root=True, setting="Apple app checks: off -> on", undo={"type": "cmd", "argv": ["spctl", "--global-disable"]})
-        out.append(("fixed" if fix else "issue", "Apple's app checks were off" if fix else "Apple's app checks are off"))
-    else:
-        out.append(("ok", "Apple's app checks on"))
-    pref = "/Library/Preferences/com.apple.SoftwareUpdate"
-    for key, name in (("AutomaticCheckEnabled", "check for updates"), ("AutomaticDownload", "download updates"),
-                      ("CriticalUpdateInstall", "install security fixes"), ("ConfigDataInstall", "update malware rules")):
-        if _read(["defaults", "read", pref, key]) == "0":  # a missing key means macOS's default, which is on
-            if fix:
-                prev = _read(["defaults", "read", pref, key])
-                run(["defaults", "write", pref, key, "-bool", "true"])
-                undo_argv = ["defaults", "write", pref, key, "-bool", "false"] if prev == "0" else ["defaults", "delete", pref, key]
-                ledger_add("setting", root=True, setting=f"Auto {name}: on", undo={"type": "cmd", "argv": undo_argv})
-            out.append(("fixed" if fix else "issue", f"Automatic {name} {'was' if fix else 'is'} off (System Settings > General > Software Update)"))
-    out.append(("ok" if "On" in _read(["fdesetup", "status"]) else "issue", "Disk encryption (FileVault)"))
-    rl = _read(["systemsetup", "-getremotelogin"])
-    if "On" in rl:
-        out.append(("issue", "Remote login (SSH) is on. Turn off in System Settings > General > Sharing if unused"))
-    prof = _read(["profiles", "list"])
-    ids = sorted(set(re.findall(r"profileIdentifier:\s*(\S+)", prof)))
-    ids = [i for i in ids if not i.startswith("com.leviathan.")]
-    if ids:
-        out.append(("issue", "Settings profiles installed, check they are ones you added (System Settings > General > Device Management): " + ", ".join(ids)))
-    return out
 
 
 # ---------- Chrome: notification spam + hijacked search ----------
-CHROME = os.path.join(HOME, "Library/Application Support/Google/Chrome")
-GOOD_SEARCH = ("google.", "bing.com", "duckduckgo.com", "search.brave.com", "ecosia.org", "yahoo.com",
-               "kagi.com", "startpage.com", "perplexity.ai", "chatgpt.com")
-SPAMMY = re.compile(r"(push|notif|alert|allow|captcha|verify|robot|clicks?|win|prize|news\d|\d{4,})", re.I)
 
 
-def _chrome_profiles():
-    if not os.path.isdir(CHROME):
-        return []
-    return [os.path.join(CHROME, d, "Preferences") for d in os.listdir(CHROME)
-            if (d == "Default" or d.startswith("Profile ")) and os.path.exists(os.path.join(CHROME, d, "Preferences"))]
 
 
-def _spam_sites(prefs, bl):
-    ex = prefs.get("profile", {}).get("content_settings", {}).get("exceptions", {}).get("notifications", {})
-    bad = []
-    for pat, v in ex.items():
-        if v.get("setting") != 1:
-            continue
-        host = re.sub(r"^https?://|[:/].*$|^\[\*\.\]", "", pat.split(",")[0])
-        if domain_blocked(host, bl) or SPAMMY.search(host):
-            bad.append(pat)
-    return bad
 
 
-def chrome_report():
-    out, bl = [], blocklist()
-    for pf in _chrome_profiles():
-        try:
-            prefs = json.load(open(pf))
-        except Exception:
-            continue
-        name = os.path.basename(os.path.dirname(pf))
-        spam = _spam_sites(prefs, bl)
-        if spam:
-            out.append(("issue", f"Chrome ({name}): {len(spam)} likely spam sites can send you notifications. Fix: quit Chrome, run: leviathan fix-chrome-notify"))
-        url = prefs.get("default_search_provider_data", {}).get("template_url_data", {}).get("url", "")
-        if url and not any(g in url for g in GOOD_SEARCH):
-            out.append(("issue", f"Chrome ({name}) search engine looks hijacked: {url[:80]}. Fix in Chrome Settings > Search engine"))
-    if _chrome_profiles() and not out:
-        out.append(("ok", "Chrome notifications and search engine look clean"))
-    return out
 
 
-def fix_chrome_notify():
-    if run(["pgrep", "-x", "Google Chrome"])[0] == 0:
-        print("Quit Chrome first, then run this again.")
-        return
-    bl = blocklist()
-    for pf in _chrome_profiles():
-        prefs = json.load(open(pf))
-        spam = _spam_sites(prefs, bl)
-        if not spam:
-            continue
-        backup = pf + ".leviathan-" + time.strftime("%Y%m%d%H%M%S")
-        shutil.copy2(pf, backup)
-        ex = prefs["profile"]["content_settings"]["exceptions"]["notifications"]
-        for pat in spam:
-            ex.pop(pat, None)
-        json.dump(prefs, open(pf, "w"))
-        ledger_add("setting", setting=f"Chrome: revoked notifications for {len(spam)} spam sites",
-                   undo={"type": "move", "src": backup, "dst": pf})
-        print(f"Revoked {len(spam)} spam notification sites. Undo with leviathan undo.")
 
 
 # ---------- full scan (read-only) ----------
-def _listeners():
-    """Programs accepting connections from other computers, not just this Mac."""
-    code, out = run(["lsof", "+c", "0", "-nP", "-iTCP", "-sTCP:LISTEN", "-F", "pcn"], timeout=30)
-    found, pid, prog = {}, "", ""
-    for line in out.splitlines():
-        tag, val = line[:1], line[1:]
-        if tag == "p":
-            pid = val
-        elif tag == "c":
-            prog = val.replace("\\x20", " ")
-        if tag != "n" or not pid:
-            continue
-        exe = run(["ps", "-p", pid, "-o", "comm="])[1].strip()
-        if exe.startswith(("/System/", "/usr/libexec/", "/usr/sbin/")):
-            continue  # macOS's own sharing services (AirPlay, Handoff) are expected
-        addr = val
-        host, _, port = addr.rpartition(":")
-        if host in ("127.0.0.1", "[::1]", "localhost") or host.startswith("127."):
-            continue
-        found.setdefault((prog, port), host)
-    return [f"{prog} accepts connections from your network on port {port}" for (prog, port) in sorted(found)]
 
 
 def full_scan():
@@ -732,7 +607,7 @@ def full_scan():
             apps += [os.path.join(d, n) for n in sorted(os.listdir(d)) if n.endswith(".app")]
         except OSError:
             pass
-    print(f"Leviathan scan: {len(apps)} apps, Downloads, auto-start items, network, settings. Changes nothing.\n")
+    print(f"Leviathan scan: {len(apps)} apps, Downloads, auto-start items, website filter. Changes nothing.\n")
     print("  checking apps against Apple's malware rules...")
     for p, rule in batch_yara(apps).items():
         threats.append(f"{p}: matches Apple's malware rules ({rule})")
@@ -759,39 +634,29 @@ def full_scan():
             level, why = persist_verdict(os.path.join(d, n))
             if level == "bad":
                 threats.append(f"{os.path.join(d, n)}: {why}")
-    issues += _listeners()
-    for lvl, msg in sweep_user(False):  # includes the read-only system checks
-        if lvl == "issue":
-            issues.append(msg)
+    lvl, msg = website_filter_report()
+    if lvl == "issue":
+        issues.append(msg)
     print("\nThreats (things no one wants on their computer):")
     for t in threats or ["none found"]:
         print("  " + t)
-    print("\nOpenings to close:")
+    print("\nTo fix:")
     for t in issues or ["none found"]:
         print("  " + t)
     if threats:
         print("\nRemove a threat so it can't run (undoable): leviathan contain PATH")
-    if issues:
-        print("Fix the settings above that Leviathan can change (undoable): leviathan sweep --fix")
     return len(threats)
 
 
-def undo_settings():
-    """Reverses every setting change in this log that is not already undone."""
-    es = _entries()
-    done = {e.get("ref") for e in es if e["kind"] == "undone"}
-    for e in reversed(es):
-        if e["kind"] == "setting" and e["id"] not in done:
-            undo(e["id"])
 
 
 # ---------- status + main ----------
-AI_ALERT_KINDS = ("canary-trigger",)
+AI_ALERT_KINDS = ("canary-trigger", "agent-tripped", "agent-secret-access")
 
 def status():
     es = _entries()
     undone = {e.get("ref") for e in es if e["kind"] == "undone"}
-    shown = [e for e in es if e["kind"] in ("contained", "setting", "blocked", "flagged") + AI_ALERT_KINDS]
+    shown = [e for e in es if e["kind"] in ("contained", "safeboxed", "setting", "blocked", "flagged") + AI_ALERT_KINDS]
     if not shown and not os.path.exists(os.path.join(ROOT_DIR, "ledger.jsonl")):
         print("Nothing has needed action yet.")
     for e in shown[-30:]:
@@ -810,10 +675,218 @@ def status():
             print(f"#S{e['id']} {e['time'][:16]} system {e['kind']}: {e.get('path') or e.get('setting')}{tag}")
 
 
-def print_sweep(results):
-    for lvl, msg in results:
-        mark = {"ok": "OK   ", "fixed": "FIXED", "issue": "CHECK"}[lvl]
-        print(f"  {mark} {msg}")
+
+
+# ---------- Safe Box: apps Apple never checked run with no access to your files ----------
+SAFEBOX = os.path.join(STATE, "safebox")
+# Folders a Safe Box app can never open, even inside its own box rules (last matching rule wins).
+SECRET_DIRS = (".ssh", ".aws", ".gnupg", ".config/gh", "Library/Keychains", "Library/Cookies", "Library/Safari",
+               "Library/Mail", "Library/Messages",
+               "Library/Application Support/Google/Chrome", "Library/Application Support/Firefox",
+               "Library/Application Support/BraveSoftware", "Library/Application Support/Arc",
+               "Library/Application Support/Ledger Live", "Library/Application Support/Exodus",
+               "Library/Application Support/Electrum", "Library/Application Support/@trezor",
+               "Library/Application Support/Sparrow", "Library/Application Support/Bitcoin")
+
+
+LAUNCHER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "safebox", "leviathan-safebox")
+
+
+def quarantined(path):
+    """True when macOS marked the file as downloaded from the internet (apps you built yourself have no mark)."""
+    return run(["xattr", "-p", "com.apple.quarantine", path])[0] == 0
+
+
+def _sb(path):
+    return json.dumps(path)  # a sandbox-profile string literal uses the same quoting as JSON
+
+
+def safebox_profile(home, box, app):
+    """Pure function: sandbox-exec profile text. macOS stays readable so the app starts; your home folder is
+    closed except the app's own box; secret folders, password prompts and the keychain tool are blocked.
+    In sandbox profiles the LAST matching rule wins, so the denies come first and the allows after."""
+    home = os.path.realpath(home)  # sandbox rules match real paths, not symlinks
+    lines = ["(version 1)", "(allow default)",
+             f"(deny file-read* file-write* (subpath {_sb(home)}))",
+             "(deny file-write* (subpath \"/Library\") (subpath \"/Applications\") (subpath \"/usr/local\") (subpath \"/opt\"))",
+             f"(allow file-read* file-write* (subpath {_sb(os.path.realpath(box))}))",
+             f"(allow file-read* (subpath {_sb(os.path.realpath(app))}))"]
+    lines += [f"(deny file-read* file-write* (subpath {_sb(os.path.join(home, d))}))" for d in SECRET_DIRS]
+    lines += ['(deny process-exec (literal "/usr/bin/osascript") (literal "/usr/bin/security") (literal "/usr/bin/sudo")'
+              ' (literal "/bin/launchctl") (literal "/usr/bin/xattr") (literal "/usr/sbin/spctl"))']
+    return "\n".join(lines) + "\n"
+
+
+def _box_for(app):
+    name = os.path.basename(app.rstrip("/"))
+    name = name[:-4] if name.endswith(".app") else name
+    return os.path.join(SAFEBOX, re.sub(r"[^A-Za-z0-9_-]", "_", name).strip("_") or "app")  # no dots: ".." never reaches the path
+
+
+def safebox_wrap(path, why):
+    """Moves a downloaded app Apple never checked into its Safe Box and puts a launcher with the same name where it
+    was, so it opens from the Dock, Finder and Launchpad as before but can't see your files. Undo restores it."""
+    if not path.endswith(".app") or not os.path.isdir(path):
+        return False
+    box = _box_for(path)
+    real = os.path.join(box, "app", os.path.basename(path))
+    if os.path.lexists(real):
+        return False
+    try:
+        info = plistlib.load(open(os.path.join(path, "Contents/Info.plist"), "rb"))
+        os.makedirs(os.path.dirname(real), exist_ok=True)
+        shutil.move(path, real)
+    except Exception:
+        return False
+    try:
+        os.makedirs(os.path.join(path, "Contents/MacOS"))
+        os.makedirs(os.path.join(path, "Contents/Resources"))
+        icon = info.get("CFBundleIconFile", "")
+        icon = icon if icon.endswith(".icns") or not icon else icon + ".icns"
+        if icon and os.path.exists(os.path.join(real, "Contents/Resources", icon)):
+            shutil.copy2(os.path.join(real, "Contents/Resources", icon), os.path.join(path, "Contents/Resources", icon))
+        name = info.get("CFBundleName") or os.path.basename(path)[:-4]
+        with open(os.path.join(path, "Contents/Info.plist"), "wb") as f:
+            plistlib.dump({"CFBundleExecutable": "leviathan-safebox", "CFBundleIdentifier": "com.leviathan.safebox." + os.path.basename(box),
+                           "CFBundleName": name, "CFBundlePackageType": "APPL", "CFBundleIconFile": icon,
+                           "CFBundleShortVersionString": info.get("CFBundleShortVersionString", "1")}, f)
+        # A small compiled launcher (safebox/launcher.c): Finder and the Dock refuse to open a bundle whose program is a script.
+        shutil.copy2(LAUNCHER, os.path.join(path, "Contents/MacOS/leviathan-safebox"))
+        with open(os.path.join(path, "Contents/Resources/run.sh"), "w") as f:
+            f.write("exec %s %s safebox open --exec %s\n" % (shlex.quote(sys.executable), shlex.quote(os.path.abspath(__file__)), shlex.quote(real)))
+        run(["codesign", "--force", "--sign", "-", path], timeout=30)
+    except Exception:
+        shutil.rmtree(path, ignore_errors=True)
+        shutil.move(real, path)
+        return False
+    i = ledger_add("safeboxed", path=path, reason=why, undo={"type": "move", "src": real, "dst": path, "remove": path})
+    notify(f"{os.path.basename(path)[:-4]} will open in a Safe Box: it can't see your files or passwords. Undo: leviathan undo {i}")
+    return True
+
+
+def safebox_open(app, exec_=False):
+    try:  # the bundle names its own executable; the first file in MacOS/ may be a helper
+        with open(os.path.join(app, "Contents/Info.plist"), "rb") as f:
+            exe = os.path.join(app, "Contents/MacOS", plistlib.load(f)["CFBundleExecutable"])
+    except Exception:
+        sys.exit("Not a normal app: no executable named in Info.plist")
+    if not (os.path.isfile(exe) and os.access(exe, os.X_OK)):
+        sys.exit("Cannot run: " + exe)
+    if "com.apple.security.app-sandbox" in run(["codesign", "-d", "--entitlements", "-", app])[1]:
+        os.execv("/usr/bin/open", ["open", "-a", app])  # Apple's own sandbox already applies; macOS kills an app sandboxed twice
+    box = _box_for(app)
+    fake_home = os.path.join(box, "home")
+    os.makedirs(fake_home, exist_ok=True)
+    profile = os.path.join(box, "profile.sb")
+    with open(profile, "w") as f:
+        f.write(safebox_profile(HOME, box, app))
+    env = {k: v for k, v in os.environ.items() if k in ("PATH", "LANG", "TERM", "TMPDIR", "USER", "LOGNAME", "SHELL")}
+    env.update(HOME=fake_home, CFFIXED_USER_HOME=fake_home)  # the app's settings and saves go to its box
+    argv = ["/usr/bin/sandbox-exec", "-f", profile, exe]
+    if exec_:
+        os.execve(argv[0], argv, env)
+    log = os.path.join(box, "safebox.log")  # a file, not a pipe: a long-running app must never block on output
+    with open(log, "w") as lf:
+        p = subprocess.Popen(argv, env=env, stdout=lf, stderr=lf, start_new_session=True)
+    try:
+        p.wait(timeout=2)
+        sys.exit("Safe Box could not start it: " + (open(log, errors="replace").read().strip()[-400:] or "exit code %d" % p.returncode))
+    except subprocess.TimeoutExpired:
+        print(f"Started {os.path.basename(app)} in a Safe Box. It can't see your files. Its own folder: {fake_home}")
+
+
+# ---------- VPN: Cloudflare WARP (free), on automatically on networks you haven't trusted ----------
+VPN_FILE = os.path.join(STATE, "vpn.json")
+WARP = next((p for p in ("/usr/local/bin/warp-cli", "/opt/homebrew/bin/warp-cli") if os.path.exists(p)), shutil.which("warp-cli"))
+
+
+def vpn_state():
+    try:
+        st = json.load(open(VPN_FILE))
+    except Exception:
+        st = {}
+    st.setdefault("mode", "auto")
+    st.setdefault("trusted", [])
+    return st
+
+
+def _vpn_save(st):
+    os.makedirs(STATE, exist_ok=True)
+    with open(VPN_FILE, "w") as f:
+        json.dump(st, f)
+
+
+def network_id():
+    """The router's hardware address, which stays the same while the VPN is up (the network name needs Location access)."""
+    for dev in ("en0", "en1", "en2", "en3"):
+        router = run(["ipconfig", "getoption", dev, "router"], timeout=5)[1].strip()
+        if re.fullmatch(r"\d+\.\d+\.\d+\.\d+", router):
+            m = re.search(r" at ([0-9a-f:]{11,17}) ", run(["arp", "-n", router], timeout=5)[1])
+            if m:
+                return m.group(1)
+    return None
+
+
+def _warp(*args):
+    return run([WARP, "--accept-tos"] + list(args), timeout=30)
+
+
+def vpn_connected():
+    return bool(WARP) and "Connected" in _warp("status")[1]
+
+
+def _vpn_up():
+    if _warp("registration", "show")[0] != 0:
+        _warp("registration", "new")
+    _warp("dns", "families", "off")  # Cloudflare's malware filter blocks legal adult sites; the Quad9 website filter covers malware
+    _warp("connect")
+
+
+def vpn_check():
+    """Run by com.leviathan.vpnwatch whenever the network changes."""
+    st = vpn_state()
+    if not WARP:
+        return "VPN needs Cloudflare WARP (free). Install: brew install --cask cloudflare-warp"
+    if st["mode"] == "off":
+        return "VPN is off."
+    net = network_id()
+    want = st["mode"] == "on" or net not in st["trusted"]
+    if want and not vpn_connected():
+        _vpn_up()
+        ledger_add("vpn", what="VPN on", reason="untrusted network" if st["mode"] == "auto" else "always on")
+    elif not want and vpn_connected():
+        _warp("disconnect")
+        ledger_add("vpn", what="VPN off", reason="trusted network")
+    return vpn_status()
+
+
+def vpn_set(mode):
+    st = vpn_state()
+    st["mode"] = mode
+    _vpn_save(st)
+    if mode == "off" and WARP:
+        _warp("disconnect")
+    return vpn_check()
+
+
+def vpn_trust(on):
+    st, net = vpn_state(), network_id()
+    if not net:
+        return "Not connected to a network."
+    st["trusted"] = [t for t in st["trusted"] if t != net] + ([net] if on else [])
+    _vpn_save(st)
+    return vpn_check()
+
+
+def vpn_status():
+    st = vpn_state()
+    if not WARP:
+        return "VPN: not installed. Install Cloudflare WARP (free): brew install --cask cloudflare-warp"
+    trace = run(["curl", "-s", "--max-time", "5", "https://www.cloudflare.com/cdn-cgi/trace"], timeout=8)[1]
+    m = re.search(r"^warp=(\w+)", trace, re.M)
+    real = {"on": "on", "plus": "on", "off": "off"}.get(m.group(1) if m else "", "unknown (offline)")
+    here = "trusted" if network_id() in st["trusted"] else "not trusted"
+    return f"VPN: {real}. Mode: {st['mode']}. This network: {here}."
 
 
 # levplus holds the AI agent watch and the installer check
@@ -833,11 +906,6 @@ def main():
         scan_persist()
     elif c == "scan-all":
         scan_dir(DOWNLOADS, "downloads"); scan_dir("/Applications", "apps", only_apps=True); scan_persist(); purge()
-    elif c == "sweep":
-        fix = "--fix" in a
-        res = sweep_system(fix) if os.geteuid() == 0 else sweep_user(fix)
-        if "--quiet" not in a:
-            print_sweep(res)
     elif c == "check-cmd":
         msg = check_cmd(" ".join(a[1:]))
         if msg:
@@ -854,6 +922,14 @@ def main():
         if lvl == "bad" and "--contain" in a:
             contain(target, "removed by you after check")
         sys.exit(1 if lvl in ("bad", "missing") else 0)
+    elif c == "undo-all":  # uninstall: every setting change, and every app back out of the Safe Box
+        es = _entries()
+        done = {e.get("ref") for e in es if e["kind"] == "undone"}
+        for e in reversed(es):
+            if e["kind"] in ("setting", "safeboxed") and e["id"] not in done:
+                undo(e["id"])
+    elif c == "refresh":  # weekly: new scam-site list, old quarantine emptied
+        refresh_blocklist(); purge()
     elif c == "purge":
         print(f"Deleted {purge()} quarantined item(s) older than {KEEP_DAYS} days.")
     elif c == "pwwatch":
@@ -863,14 +939,26 @@ def main():
             print(f"System change. Run: sudo \"{ROOT_TOOL}\" undo {a[1][1:]}")
         else:
             undo(a[1].lstrip("Ss"))
-    elif c == "undo-settings":
-        undo_settings()
     elif c == "scan":
         sys.exit(1 if full_scan() else 0)
     elif c == "verify":
         sys.exit(0 if verify() else 1)
-    elif c == "fix-chrome-notify":
-        fix_chrome_notify()
+    elif c == "safebox" and a[1:2] == ["list"]:
+        boxed = sorted(os.listdir(SAFEBOX)) if os.path.isdir(SAFEBOX) else []
+        print("\n".join(boxed) or "No apps in the Safe Box.")
+    elif c == "safebox" and len(a) > 2 and a[1] in ("open", "wrap"):
+        app = os.path.abspath(a[-1])
+        if a[1] == "wrap":
+            sys.exit(0 if safebox_wrap(app, "put in the Safe Box by you") else 1)
+        safebox_open(app, exec_=("--exec" in a))
+    elif c == "vpn":
+        sub = a[1] if len(a) > 1 else "status"
+        fn = {"on": lambda: vpn_set("on"), "off": lambda: vpn_set("off"), "auto": lambda: vpn_set("auto"),
+              "check": vpn_check, "trust": lambda: vpn_trust(True), "untrust": lambda: vpn_trust(False),
+              "status": vpn_status, "--json": lambda: json.dumps(vpn_state())}.get(sub)
+        if not fn:
+            sys.exit("Usage: leviathan vpn [on|off|auto|check|trust|untrust|status]")
+        print(fn())
     elif c == "status":
         status()
     elif not LP:
@@ -899,6 +987,12 @@ def main():
             print(LP.agents_config_audit())
         elif sub == "monitor":
             print(LP.agents_monitor())
+        elif sub == "tripped":
+            print(LP.agents_tripped())
+        elif sub == "report":
+            print(LP.agents_report("--jsonl" in a))
+        elif sub == "run":
+            sys.exit(LP.agents_run(a[a.index("--") + 1:] if "--" in a else a[2:]))
         elif sub == "":
             procs = LP.agent_procs()
             for pid, name in procs:
@@ -906,7 +1000,7 @@ def main():
             if not procs:
                 print("No AI agent processes found.")
         else:
-            sys.exit("Usage: leviathan agents [pause|resume|canary [on]|config|monitor]")
+            sys.exit("Usage: leviathan agents [pause|resume|canary [on]|config|monitor|tripped|report [--jsonl]|run -- CMD]")
     elif c == "ai" and a[1:2] == ["safety"]:
         print(LP.ai_safety_check())
     else:
