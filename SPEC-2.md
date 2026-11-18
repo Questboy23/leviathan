@@ -66,3 +66,5 @@ No self-hosted VPN server (costs monthly, ties traffic to one rented IP, adds no
 
 ### Removed in 2.0.7
 VPN control (`leviathan vpn`) was removed at the owner's request.
+
+Removed in 2.0.9: the menu bar clipboard guard (lines 13 and 41 above). Every copy opened an empty warning, and the crypto-swap check never received the previous clipboard. Copying is silent.
