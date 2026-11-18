@@ -7,7 +7,7 @@
 
 **Leviathan does three jobs on your Mac.** It stops viruses, including in cracked and pirated apps. It keeps AI agents like Claude Code and Codex away from your secrets. It turns on a free VPN on networks you don't trust. It stays silent the rest of the time, and every action can be undone.
 
-Version 3.0.0. 117 of 117 tests pass on macOS 26 (Apple silicon). Version 3.0 removed the settings sweep, the Chrome fixes and the open-ports check, and added the Safe Box, the VPN, the agent box and the decoy tripwire.
+Version 3.0.1. 117 of 117 tests pass on macOS 26 (Apple silicon). Version 3.0 removed the settings sweep, the Chrome fixes and the open-ports check, and added the Safe Box, the VPN, the agent box and the decoy tripwire.
 
 ## Install
 
@@ -23,7 +23,7 @@ You need a Mac and [Homebrew](https://brew.sh). Leviathan installs its 2 helpers
 2. Paste this line and press Return:
 
 ```
-cd ~ && curl -fsSL https://github.com/Questboy23/leviathan/archive/refs/tags/v3.0.0.tar.gz | tar xz && bash leviathan-3.0.0/install.sh
+cd ~ && curl -fsSL https://github.com/Questboy23/leviathan/archive/refs/tags/v3.0.1.tar.gz | tar xz && bash leviathan-3.0.1/install.sh
 ```
 
 3. If macOS asks whether `python3` may access Downloads, click Allow.
@@ -44,7 +44,7 @@ Done. It takes about 1 to 3 minutes.
 | Part | What it catches | What it does |
 |---|---|---|
 | Safe Box | Any downloaded app that Apple never checked (unsigned or not notarized), which covers most cracked and pirated apps | Moves the app into a box and leaves a launcher with the same name and icon in its place. The app opens as usual from Finder, the Dock and Launchpad. Inside the box it can't open your home folder, SSH keys, browser data, keychains, wallets, Mail or Messages. It can't show a password box, use the keychain tool, use sudo, or set itself to start at login. Its own settings and saves stay in its box. `leviathan undo N` takes it out. |
-| Downloads and apps | Files matching Apple's own malware rules (XProtect), apps whose developer Apple revoked, files downloaded from known malware sites | Moves them to a folder where they can't run. `leviathan undo` puts them back for 7 days. |
+| Downloads and apps | Files matching Apple's own malware rules (XProtect), apps whose developer Apple revoked, files downloaded from known malware sites | Moves them to the Trash with their permission to run removed, so they can't run even from there. `leviathan undo` puts them back. |
 | Auto-start items | Programs that set themselves to start at login while pretending to be Apple, or hiding unsigned in a secret folder | Switches them off and moves them out. Undoable. |
 | Paste guard | Pasted Terminal commands that download and run code, unscramble hidden code and run it, strip Apple's safety check, or draw a fake password box | Stops the command once and says why. Press Enter again to run it anyway. |
 | Fake password boxes | Pop-ups that ask for your password with hidden typing | Closes them. |
@@ -101,7 +101,7 @@ leviathan verify                  check that the log has not been edited
 ## How it stays safe itself
 
 - Nothing runs as administrator. The only admin step is the macOS profile, which macOS itself installs.
-- Your log and quarantine folder are readable by you only, and the log is hash-chained so `leviathan verify` catches edits.
+- Your log is readable by you only, and the log is hash-chained so `leviathan verify` catches edits.
 - The background watcher wakes only when a watched folder changes, plus one check an hour.
 
 ## Uninstall
@@ -110,7 +110,7 @@ leviathan verify                  check that the log has not been edited
 bash ~/.leviathan/bin/uninstall.sh
 ```
 
-This removes every part and reverses every setting Leviathan changed. Add `--keep-settings` to leave the settings as they are. Anything it caught stays in `~/.leviathan/quarantine`, where it can't run. Remove the website filter in System Settings > General > Device Management.
+This removes every part and reverses every setting Leviathan changed. Add `--keep-settings` to leave the settings as they are. Viruses it caught stay in the Trash, where they can't run. Remove the website filter in System Settings > General > Device Management.
 
 ## Tests
 

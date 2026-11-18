@@ -1,6 +1,6 @@
 #!/bin/bash
 # Removes Leviathan completely and reverses every setting it changed.
-# Keeps ~/.leviathan/quarantine and the log so nothing it caught is lost. Add --keep-settings to leave settings as they are.
+# Keeps the log; viruses it caught stay in the Trash where they can't run. Add --keep-settings to leave settings as they are.
 S="$HOME/.leviathan"; U=$(id -u); LA="$HOME/Library/LaunchAgents"; R="/Library/Application Support/Leviathan"
 for j in watch weekly persistwatch agentwatch vpnwatch bar; do launchctl bootout gui/$U "$LA/com.leviathan.$j.plist" 2>/dev/null; rm -f "$LA/com.leviathan.$j.plist"; done
 PY=$(sed -n 's/^exec "\([^"]*\)".*/\1/p' "$HOME/.local/bin/leviathan" 2>/dev/null)
@@ -27,4 +27,4 @@ for rc in "$HOME/.bash_profile" "$HOME/.zshrc"; do [ -f "$rc" ] && sed -i '' '/#
 rm -f "$HOME/.local/bin/leviathan"
 echo "Leviathan removed. Every setting it changed is back to how it was."
 echo "If you installed the website filter: System Settings > General > Device Management (or Privacy & Security > Profiles), select Leviathan website filter, click Remove."
-echo "Anything it caught is still in $S/quarantine (it can't run there)."
+echo "Viruses it caught are in the Trash, where they can't run. Empty the Trash to delete them."

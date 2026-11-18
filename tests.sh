@@ -2,7 +2,7 @@
 # Leviathan tests. Uses a throwaway folder; changes no system settings.
 PY=/opt/homebrew/bin/python3; SRC="$(cd "$(dirname "$0")" && pwd)"
 T=$(mktemp -d); export LEVIATHAN_STATE="$T/state" LEVIATHAN_DOWNLOADS="$T/dl" LEVIATHAN_QUIET=1 LEVIATHAN_NO_SPAWN=1
-export LEVIATHAN_DRY_PAUSE=1 LEVIATHAN_PERSIST_DIRS="$T/agents" LEVIATHAN_CANARY_DIR="$T/canary"; mkdir -p "$LEVIATHAN_STATE" "$LEVIATHAN_DOWNLOADS" "$T/agents" "$T/.hidden"
+export LEVIATHAN_TRASH="$T/trash" LEVIATHAN_DRY_PAUSE=1 LEVIATHAN_PERSIST_DIRS="$T/agents" LEVIATHAN_CANARY_DIR="$T/canary"; mkdir -p "$LEVIATHAN_STATE" "$LEVIATHAN_DOWNLOADS" "$T/agents" "$T/.hidden"
 M="$PY $SRC/leviathan.py"; pass=0; fail=0
 ok() { if eval "$2"; then echo "PASS $1"; pass=$((pass+1)); else echo "FAIL $1"; fail=$((fail+1)); fi; }
 
@@ -25,8 +25,7 @@ printf '#!/bin/sh\necho hello\n' > "$LEVIATHAN_DOWNLOADS/tool.command"; chmod 75
 echo "notes" > "$LEVIATHAN_DOWNLOADS/notes.txt"
 $M scan-downloads >/dev/null
 ok "malware moved out of Downloads" '[ ! -e "$LEVIATHAN_DOWNLOADS/invoice.command" ]'
-Q=$(ls "$LEVIATHAN_STATE/quarantine" | grep invoice)
-ok "malware can't run in quarantine" '[ ! -x "$LEVIATHAN_STATE/quarantine/$Q" ]'
+ok "malware moved to the Trash and can't run there" '[ -e "$T/trash/invoice.command" ] && [ ! -x "$T/trash/invoice.command" ]'
 ok "unsigned script left alone, no label" '[ -x "$LEVIATHAN_DOWNLOADS/tool.command" ] && ! xattr -p com.apple.metadata:_kMDItemUserTags "$LEVIATHAN_DOWNLOADS/tool.command" >/dev/null 2>&1'
 ok "unsigned script only noted in the private log" 'grep -q "\"noticed\".*tool.command" "$LEVIATHAN_STATE/ledger.jsonl"'
 ok "log is private (mode 600)" '[ "$(stat -f %Lp "$LEVIATHAN_STATE/ledger.jsonl")" = 600 ]'
@@ -55,9 +54,9 @@ ok "purge deletes items older than 7 days" '[ ! -e "$Q/20200101-000000-old.bin" 
 ok "purge keeps recent items" 'ls "$Q" | grep -q -- "-new.bin"'
 ok "purge leaves files it did not make" '[ -e "$Q/notours.bin" ]'
 ok "purge is logged" 'grep -q "\"deleted\"" "$LEVIATHAN_STATE/ledger.jsonl"'
-printf x > "$T/gone.txt"; $M contain "$T/gone.txt" >/dev/null; rm -f "$Q"/*-gone.txt
+printf x > "$T/gone.txt"; $M contain "$T/gone.txt" >/dev/null; rm -f "$T/trash/gone.txt"
 GID=$(grep '"contained"' "$LEVIATHAN_STATE/ledger.jsonl" | tail -1 | $PY -c 'import json,sys;print(json.loads(sys.stdin.read())["id"])')
-ok "undo after deletion explains instead of crashing" '$M undo "$GID" | grep -q "deleted after 7 days"'
+ok "undo after deletion explains instead of crashing" '$M undo "$GID" | grep -q "no longer in the Trash"'
 
 # 3. auto-start: fake Apple job with unsigned hidden program is contained
 printf 'int main(){return 0;}' > "$T/a.c"; clang -o "$T/.hidden/trustd" "$T/a.c" 2>/dev/null && codesign --remove-signature "$T/.hidden/trustd"

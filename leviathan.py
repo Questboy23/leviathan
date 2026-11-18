@@ -13,7 +13,8 @@ ROOT_DIR = "/var/db/leviathan"
 ROOT_TOOL = "/Library/Application Support/Leviathan/leviathan-root"
 # root keeps its own log in a root-owned folder, so nothing you can edit is ever run as root
 STATE = ROOT_DIR if IS_ROOT else os.environ.get("LEVIATHAN_STATE", os.path.join(HOME, ".leviathan"))
-QUAR = os.path.join(STATE, "quarantine")
+QUAR = os.path.join(STATE, "quarantine")  # versions before 3.0.1 kept caught files here; purge() still empties it
+TRASH = os.environ.get("LEVIATHAN_TRASH", os.path.join(HOME, ".Trash"))
 LEDGER = os.path.join(STATE, "ledger.jsonl")
 SEEN = os.path.join(STATE, "seen.json")
 BLOCKLIST = os.path.join(ROOT_DIR, "blocklist.txt") if os.path.exists(os.path.join(ROOT_DIR, "blocklist.txt")) else os.path.join(STATE, "blocklist.txt")
@@ -228,8 +229,13 @@ def verdict(path, bl=None):
 
 # ---------- actions (all undoable) ----------
 def contain(path, reason, after=None):
-    os.makedirs(QUAR, exist_ok=True)
-    dst = os.path.join(QUAR, time.strftime("%Y%m%d-%H%M%S-") + os.path.basename(path.rstrip("/")))
+    """Moves a certain threat to the Trash with its run permission removed, so double-clicking it there does nothing."""
+    os.makedirs(TRASH, exist_ok=True)
+    base = os.path.basename(path.rstrip("/"))
+    dst = os.path.join(TRASH, base)
+    if os.path.lexists(dst):  # the Trash keeps both, like Finder does
+        stem, ext = os.path.splitext(base)
+        dst = os.path.join(TRASH, f"{stem} (virus {time.strftime('%H.%M.%S')}){ext}")
     modes = {}
     shutil.move(path, dst)
     for root, dirs, files in os.walk(dst) if os.path.isdir(dst) else [(os.path.dirname(dst), [], [os.path.basename(dst)])]:
@@ -243,7 +249,7 @@ def contain(path, reason, after=None):
                 pass
     i = ledger_add("contained", path=path, reason=reason,
                    undo={"type": "move", "src": dst, "dst": path, "modes": modes, "after": after or []})
-    notify(f"Removed a threat: {os.path.basename(path)}. It can't run. Deleted for good in {KEEP_DAYS} days. Undo: leviathan undo {i}")
+    notify(f"Moved a virus to the Trash: {os.path.basename(path)}. It can't run there. Undo: leviathan undo {i}")
     start_pwwatch()
     return i
 
@@ -313,7 +319,7 @@ def undo(i):
     u = e["undo"]
     if u["type"] == "move":
         if not os.path.lexists(u["src"]):
-            print(f"Entry {i} can't be undone: it was deleted after {KEEP_DAYS} days in quarantine.")
+            print(f"Entry {i} can't be undone: it is no longer in the Trash (or was deleted after {KEEP_DAYS} days in the old quarantine).")
             return
         if u.get("remove") and os.path.isdir(u["remove"]) and os.path.exists(os.path.join(u["remove"], "Contents/MacOS/leviathan-safebox")):
             shutil.rmtree(u["remove"])  # only our own launcher, recognised by its executable name
