@@ -14,8 +14,6 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
     var levelItems: [Int: NSMenuItem] = [:]
     var modeItems: [String: NSMenuItem] = [:]
     var agentLevelItems: [Int: NSMenuItem] = [:]
-    var pasteboardChangeCount: Int = NSPasteboard.general.changeCount
-    var clipboardTimer: Timer?
     var passwordBoxTimer: Timer?
     var alertTimer: Timer?
     var level: Int = 2
@@ -39,7 +37,6 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
         setupUI()
         requestNotificationAuth()
         checkNotificationAuth()
-        startClipboardMonitor()
         startPasswordBoxMonitor()
         refreshStatus()
     }
@@ -65,13 +62,6 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
 
     func requestNotificationAuth() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
-    }
-
-    func startClipboardMonitor() {
-        clipboardTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            self?.checkClipboard()
-        }
-        RunLoop.main.add(clipboardTimer!, forMode: .common)
     }
 
     var passwordBoxSource: DispatchSourceTimer?
@@ -386,23 +376,6 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
         menu.addItem(quitItem)
     }
 
-    func checkClipboard() {
-        let currentCount = NSPasteboard.general.changeCount
-        if currentCount != pasteboardChangeCount {
-            pasteboardChangeCount = currentCount
-            if let string = NSPasteboard.general.string(forType: .string), !string.isEmpty {
-                let limited = String(string.prefix(10240))
-                runCLIAsync(["clip"], stdin: limited, counts: false) { [weak self] output in
-                    if !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        self?.hasUnreadAlert = true
-                        self?.updateIconColor()
-                        self?.showWarning("Clipboard guard", output)
-                    }
-                }
-            }
-        }
-    }
-
     var cleanOsascript = Set<String>()  // already checked and harmless: skip re-reading its script every 3 s
 
     // Background scans and checks that turn the shield green while they run.
@@ -561,7 +534,7 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
         process.waitUntilExit()
         killer.cancel()
         let text = String(data: data, encoding: .utf8) ?? ""
-        if text.isEmpty && exe == nil { return "exit=\(process.terminationStatus) reason=\(process.terminationReason.rawValue)" }
+        if text.isEmpty && exe == nil && process.terminationStatus != 0 { return "Leviathan command failed (exit \(process.terminationStatus))." }  // silent success stays silent
         return text
     }
 

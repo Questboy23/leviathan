@@ -299,6 +299,9 @@ json.dump({f:1 for f in fs}, open(os.path.join(L.STATE,'agent_startup_mtimes.jso
 for f in fs: os.utime(f,None)
 P._agent_monitor_startup_edits(); print(','.join(sorted(got)))"; }
 ok "startup watch ignores the installer rewriting Leviathan's own plists" '[ "$(se)" = com.evil.plist ]'
+# copying text never runs a check or opens a window; silent success never becomes a message
+ok "menu bar app does not watch the clipboard" '! grep -q "changeCount\|checkClipboard" "$SRC/menubar/LeviathanBar.swift"'
+ok "empty output from a successful command shows nothing" '! grep -q "reason=" "$SRC/menubar/LeviathanBar.swift"'
 
 # agent matching
 am() { $PY -c "import sys; sys.path.insert(0,\"$SRC\"); import levplus as P; print(bool(P._is_agent_process(sys.argv[1:])))" "$@"; }
