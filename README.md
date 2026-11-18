@@ -7,7 +7,7 @@
 
 **Leviathan stops viruses before they run on your Mac.** It moves real malware where it can't run, blocks scam and malware sites in every app, and stops the "paste this command" trick. It stays silent the rest of the time, and every action can be undone.
 
-Version 2.0.9. 133 of 133 tests pass on macOS 26 (Apple silicon).
+Version 2.1.0. 99 of 99 tests pass on macOS 26 (Apple silicon). Version 2.1 cut 9 features that rarely helped or did not work, and is about 40% smaller.
 
 ## Install
 
@@ -15,7 +15,7 @@ Version 2.0.9. 133 of 133 tests pass on macOS 26 (Apple silicon).
 &nbsp;
 <a href="https://github.com/Questboy23/leviathan/releases/latest/download/Leviathan.zip"><picture><source media="(prefers-color-scheme: dark)" srcset="art/download-dark.svg"><img alt="Download the zip" src="art/download-light.svg" width="300"></picture></a>
 
-You need a Mac and [Homebrew](https://brew.sh). Leviathan installs its 3 helpers (dnscrypt-proxy, yara, python) through Homebrew by itself.
+You need a Mac and [Homebrew](https://brew.sh). Leviathan installs its 2 helpers (yara, python) through Homebrew by itself. No password is needed to install.
 
 ### One-line install
 
@@ -23,48 +23,42 @@ You need a Mac and [Homebrew](https://brew.sh). Leviathan installs its 3 helpers
 2. Paste this line and press Return:
 
 ```
-cd ~ && curl -fsSL https://github.com/Questboy23/leviathan/archive/refs/tags/v2.0.9.tar.gz | tar xz && bash leviathan-2.0.9/install.sh
+cd ~ && curl -fsSL https://github.com/Questboy23/leviathan/archive/refs/tags/v2.1.0.tar.gz | tar xz && bash leviathan-2.1.0/install.sh
 ```
 
-3. Type your Mac password when asked. The screen shows no dots while you type. That is normal.
-4. If macOS asks whether `python3` may access Downloads, click Allow.
+3. If macOS asks whether `python3` may access Downloads, click Allow.
+4. At the end System Settings opens on Profiles. Double-click **Leviathan website filter**, click **Install**, and type your Mac password. This turns on the website filter.
 
 Done. It takes about 1 to 3 minutes.
 
 ### Zip install
 
-1. Click **Download the zip** above. Your Mac unzips it into Downloads.
-2. In the unzipped `Leviathan` folder, double-click `Install Leviathan.command`. The first time, macOS blocks it because it is not from the App Store: open System Settings, Privacy & Security, scroll down, click **Open Anyway**, then double-click it again. (On macOS 15 and later, right-click Open no longer skips this.)
-3. Type your Mac password when asked. The zip includes a ready-built menu bar app, so Xcode tools are optional.
+1. Click **Download the zip** above, then double-click the zip in Downloads to unzip it.
+2. In the unzipped `Leviathan` folder, double-click `Install Leviathan.command`. The first time, macOS blocks it because it is not from the App Store: open System Settings, Privacy & Security, scroll down, click **Open Anyway**, then double-click it again.
+3. Do step 4 above for the website filter. The zip includes a ready-built menu bar app, so Xcode tools are optional.
 
 ## What it does
 
 | Watch | What it catches | What it does |
 |---|---|---|
-| I. Downloads and apps | Files matching Apple's own malware rules (XProtect), apps whose developer Apple revoked, files downloaded from known malware sites | Moves them to a folder where they can't run. `leviathan undo` puts them back. |
-| II. Auto-start items | Programs that set themselves to start at login while pretending to be Apple, or hiding unsigned in a secret folder | Switches them off and moves them out. Undoable. |
-| III. Paste guard | Pasted Terminal commands that download and run code, unscramble hidden code, strip Apple's safety check, or draw a fake password box | Stops the command once and says why. Press Enter again to run it anyway. |
-| IV. Site filter | About 300,000 known scam and malware sites, refreshed every hour, plus Quad9 and Cloudflare malware filtering | The site never loads, in any app. A watchdog switches back to normal internet within 20 seconds if the filter fails or a hotel Wi-Fi login page needs it. |
-| V. Settings | Firewall off, Apple's app checks off, security updates off, AirDrop open to everyone | Turns each one on. Undoable. Also reports disk encryption, remote login and settings profiles. |
+| Downloads and apps | Files matching Apple's own malware rules (XProtect), apps whose developer Apple revoked, files downloaded from known malware sites | Moves them to a folder where they can't run. `leviathan undo` puts them back for 7 days. |
+| Auto-start items | Programs that set themselves to start at login while pretending to be Apple, or hiding unsigned in a secret folder | Switches them off and moves them out. Undoable. |
+| Paste guard | Pasted Terminal commands that download and run code, unscramble hidden code and run it, strip Apple's safety check, or draw a fake password box | Stops the command once and says why. Press Enter again to run it anyway. |
+| Fake password boxes | Pop-ups that ask for your password with hidden typing (AppleScript, compiled scripts, JavaScript) | Closes them. One you type yourself at a Terminal prompt is allowed. |
+| Website filter | Known malware and phishing sites, through Cloudflare's security DNS (1.1.1.2), encrypted | The site never loads, in any app. It is a standard macOS profile: remove it any time in System Settings. |
+| Settings | AirDrop open to everyone, Chrome notification spam and hijacked search | Fixes them. Undoable. Also reports firewall, Apple's app checks, updates, disk encryption and settings profiles. |
+| AI agents (opt in) | Claude Code, Codex and other AI agents | Lists them and pauses or resumes all at once. With "Watch AI agents" on, decoy secret files are checked every 5 minutes and a read notifies you with the agents running. Warns when an agent is set to run commands without asking. |
+| Is this a virus? | `leviathan check File`, `leviathan pkg File.pkg` | Answers in plain words, and shows what an installer's scripts will do before you run it. |
 
-### New in 2.0
-
-| Feature | Command | What it does |
-|---|---|---|
-| Menu bar icon | (installed) | A shield next to Wi-Fi and battery: white while idle, green while a scan or check runs, orange on an alert you have not seen. Pick a level or mode from it. It opens instantly (it reads the settings file, no Python start). |
-| Levels 1 to 5 | `leviathan level 3` | Each level adds checks and costs more prompts. `leviathan level` lists what each adds. |
-| Crypto mode | `leviathan mode crypto on` | Warns when a copied wallet address is swapped, or a recovery phrase is copied. Checks wallet app signatures. |
-| Untrusted apps mode | `leviathan sandbox App.app`, `leviathan pkg File.pkg` | Runs an app with no access to your files or internet. Shows what an installer's scripts will do before you run it. |
-| Tor mode | `leviathan mode tor on` | Checks Tor Browser is genuine and current. Files from .onion sites open only in the sandbox. |
-| AI agent guard | `leviathan mode agents on`, `leviathan agents level 2`, `leviathan agents pause`, `leviathan agents whois CODE` | Lists running AI agents and pauses them all at once. With the AI agents mode on, a check runs every 5 minutes: decoy secret files with a fresh code (whois names the agents running when a leaked code was written), agents opening secret folders, new addresses, startup-file edits. Level 1 logs, 2 notifies, 3 pauses the agent. Warns when Claude Code or Codex runs without asking you. |
-| Is this a virus? | `leviathan check File`, `leviathan check --contain File` | Answers in plain words: likely malware, unknown (unsigned), or no known threat. Checks Apple's malware rules, the download site and Apple's signature. New malware none of these know can pass. |
-| Quarantine | (automatic), `leviathan undo N`, `leviathan purge` | Malware found in Downloads or Applications is moved where it cannot run. You can undo for 7 days. After 7 days it is deleted for good. Unsigned apps are never moved. |
-| Fake password boxes | (menu bar, level 2+) | Kills pop-ups that ask for your password with hidden typing (AppleScript, compiled scripts, JavaScript). One you type yourself at a Terminal prompt is allowed. |
-| Cost | `leviathan cost` | CPU time and memory of Leviathan's running processes. |
+The menu bar shield is white while idle, green while a scan runs, orange on an alert you have not seen. It opens instantly. Copying text never triggers anything.
 
 **It only acts on things no one wants on their computer.** Unsigned apps, cracked apps and homemade scripts are never blocked or labeled. They still get checked for actual malware.
 
-**Nothing leaves your Mac** except website lookups (sent encrypted to Quad9 or Cloudflare) and the hourly list download.
+**Nothing leaves your Mac** except website lookups (sent encrypted to Cloudflare once the filter is on) and a weekly list download.
+
+### Removed in 2.1
+
+Levels 1 to 5 and the crypto, untrusted-apps and Tor modes (they switched nothing on), the clipboard guard, wallet check, Tor check, app sandbox, snapshots, AI Tune-up, the decoy tripwire and code lookup, the AI attack, tamper and new-connection alerts (they fired on normal use), and the old website filter (it needed a background job running as administrator, and on the test Mac it never got installed).
 
 ## Use
 
@@ -79,17 +73,16 @@ leviathan verify      check that the log has not been edited
 
 ## What it can't do
 
-- **A brand-new flaw in macOS itself** can be attacked without you doing anything. Only Apple's updates fix those, which is why Leviathan keeps automatic security updates on.
+- **A brand-new flaw in macOS itself** can be attacked without you doing anything. Only Apple's updates fix those.
 - **Malware no list knows yet** gets through the download check. The paste guard and fake password box watch still catch the most common way Mac password stealers get in.
+- **The website filter** blocks what Cloudflare knows. A hotel Wi-Fi login page may not open while it is on; remove the profile for a moment, or use the login page's IP address.
 - **Intel Macs** should work through Homebrew's `/usr/local` paths but were not tested.
 
 ## How it stays safe itself
 
-- Every program that runs as administrator (root) lives in root-owned folders: `/Library/Application Support/Leviathan` and `/var/db/leviathan`. A program running as you can't edit them, so malware can't use Leviathan to gain admin rights.
-- Root uses Apple's own Python (`/usr/bin/python3 -I`), never one from Homebrew.
-- Root's undo log is separate from yours, so a changed file in your home folder can never be run as root.
-- Your log and quarantine folder are readable by you only.
-- The background watcher wakes only when a watched folder changes. It does not scan on a timer.
+- Nothing runs as administrator. The only admin step is the macOS profile, which macOS itself installs.
+- Your log and quarantine folder are readable by you only, and the log is hash-chained so `leviathan verify` catches edits.
+- The background watcher wakes only when a watched folder changes, plus one check an hour.
 
 ## Uninstall
 
@@ -97,7 +90,7 @@ leviathan verify      check that the log has not been edited
 bash ~/.leviathan/bin/uninstall.sh
 ```
 
-This removes every part, puts your DNS back, and reverses every setting Leviathan changed. Add `--keep-settings` to leave the settings as they are. Anything it caught stays in `~/.leviathan/quarantine`, where it can't run.
+This removes every part and reverses every setting Leviathan changed. Add `--keep-settings` to leave the settings as they are. Anything it caught stays in `~/.leviathan/quarantine`, where it can't run. Remove the website filter in System Settings > General > Device Management.
 
 ## Tests
 

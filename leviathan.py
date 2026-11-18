@@ -3,7 +3,7 @@
 Commands: scan | scan-downloads | scan-apps | scan-persist | sweep [--fix] | check-cmd CMD |
           pwwatch | undo ID | undo-settings | status | verify | contain PATH | check PATH [--contain] |
           purge | fix-chrome-notify"""
-import datetime, hashlib, json, os, plistlib, re, shlex, shutil, subprocess, sys, time, signal
+import datetime, hashlib, json, os, plistlib, re, shlex, shutil, subprocess, sys, time
 
 os.umask(0o077)  # the log and quarantine are readable by you only
 HOME = os.path.expanduser("~")
@@ -503,9 +503,9 @@ def _trusted(u):
     return any(u.startswith(t) for t in TRUSTED_INSTALLERS)
 RULES = [
     (r"(curl|wget)\b[^|;&]*\|\s*(sudo\s+)?(/bin/|/usr/bin/)?(ba|z|da|k)?sh\b", "downloads a program from the internet and runs it immediately"),
-    (r"(curl|wget)\b[^|;&]*\|\s*(sudo\s+)?(python\d*|perl|ruby|osascript|node)\b", "downloads code from the internet and runs it immediately"),
+    (r"(curl|wget)\b[^|;&]*\|\s*(sudo\s+)?(python\d*|perl|ruby|osascript|node)\s*(-\s*)?($|[;&|])", "downloads code from the internet and runs it immediately"),
     (r"(eval|(ba|z)?sh\s+-c)\s*[\"']?\$\(\s*(curl|wget)", "runs code downloaded from the internet"),
-    (r"base64\s+(-d|-D|--decode)", "unscrambles hidden text, usually to run something it doesn't want you to read"),
+    (r"base64\s+(-d|-D|--decode)[^;&]*\|\s*(sudo\s+)?(\S*/)?((ba|z|da|k)?sh|python\d*|perl|ruby|osascript|node)\b|(eval|(ba|z)?sh\s+-c)\s*[\"']?\$\(.*base64\s+(-d|-D|--decode)", "unscrambles hidden code and runs it, so you can't read what it does"),
     (r"xattr\s+(-[a-z]*[dc][a-z]*\s+)*(-[a-z]*\s+)*com\.apple\.quarantine|xattr\s+-c", "removes Apple's safety check from a file"),
     (r"osascript.*(password|hidden answer)", "shows a fake password box to steal your Mac password"),
     (r"/dev/tcp/", "opens a hidden connection to another computer"),
@@ -522,10 +522,10 @@ def check_cmd(line):
         if domain_blocked(h, bl):
             return f"It connects to a known malware or scam site ({h})."
     urls = re.findall(r"https?://([^\s\"'|)]+)", low)
-    for pat, why in RULES:
+    for i, (pat, why) in enumerate(RULES):
         if re.search(pat, low):
-            if urls and all(_trusted(u) for u in urls):
-                return ""
+            if i < 3 and urls and all(_trusted(u) for u in urls):  # a known installer's own download-and-run line; never excuses the other rules
+                continue
             return f"It {why}. Fake 'fix' and 'verify you're human' pages ask people to paste commands like this."
     return ""
 
@@ -549,17 +549,45 @@ def sweep_user(fix):
         out.append(("ok", "AirDrop limited"))
     out += chrome_report()
     out.append(website_filter_report())
+    out += [r for r in sweep_system(False) if not r[1].startswith("Disk encryption")]  # read-only: changing these needs your password
+    refresh_blocklist()
     return out
 
 
+def refresh_blocklist():
+    """Weekly copy of the scam and malware site list that downloads and pasted commands are checked against."""
+    p = os.path.join(STATE, "blocklist.txt")
+    if os.path.exists(p) and time.time() - os.path.getmtime(p) < 6 * 86400:
+        return
+    tmp = p + ".new"
+    code, _ = run(["curl", "-fsSL", "--max-time", "90", "-o", tmp,
+                   "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif.medium-onlydomains.txt"], timeout=100)
+    if code == 0 and os.path.getsize(tmp) > 100000:
+        os.replace(tmp, p)
+    elif os.path.exists(tmp):
+        os.remove(tmp)
+
+
+
+def website_filter_on():
+    """True when this Mac's DNS blocks Cloudflare's malware test site, None when offline."""
+    import socket
+    try:
+        return socket.gethostbyname("malware.testcategory.com") == "0.0.0.0"
+    except OSError:
+        try:
+            socket.gethostbyname("apple.com")
+            return True  # the test name does not resolve at all: a stricter filter is blocking it
+        except OSError:
+            return None
+
 def website_filter_report():
-    """The site filter is the system half (needs the password). Say plainly when it is not running."""
-    daemon = os.path.exists("/Library/LaunchDaemons/com.leviathan.dnscrypt.plist")
-    via_filter = "nameserver[0] : 127.0.0.1" in _read(["scutil", "--dns"])
-    if daemon and via_filter:
-        return ("ok", "Website filter on")
-    why = "its background job is not installed" if not daemon else "this Mac is not sending lookups through it"
-    return ("issue", f"Website filter is OFF ({why}). Turn it on: click the shield, then 'Website filter is off', or run  bash ~/.leviathan/bin/fix-filter.command  in Terminal; it asks for your Mac password")
+    on = website_filter_on()
+    if on:
+        return ("ok", "Website filter on (known malware and scam sites are blocked)")
+    if on is None:
+        return ("ok", "Website filter not checked (no internet)")
+    return ("issue", "Website filter is OFF. Turn it on: click the shield, then 'Turn on website filter', then Install in System Settings")
 
 
 def sweep_system(fix):
@@ -572,32 +600,33 @@ def sweep_system(fix):
             run(["/usr/libexec/ApplicationFirewall/socketfilterfw", "--setallowsignedapp", "on"])
             ledger_add("setting", root=True, setting="Firewall: off -> on",
                        undo={"type": "cmd", "argv": ["/usr/libexec/ApplicationFirewall/socketfilterfw", "--setglobalstate", "off"]})
-        out.append(("fixed" if fix else "issue", "Firewall was off"))
+        out.append(("fixed" if fix else "issue", "Firewall was off" if fix else "Firewall is off (System Settings > Network > Firewall)"))
     else:
         out.append(("ok", "Firewall on"))
     if "disabled" in _read(["spctl", "--status"]):
         if fix:
             run(["spctl", "--global-enable"])
             ledger_add("setting", root=True, setting="Apple app checks: off -> on", undo={"type": "cmd", "argv": ["spctl", "--global-disable"]})
-        out.append(("fixed" if fix else "issue", "Apple's app checks were off"))
+        out.append(("fixed" if fix else "issue", "Apple's app checks were off" if fix else "Apple's app checks are off"))
     else:
         out.append(("ok", "Apple's app checks on"))
     pref = "/Library/Preferences/com.apple.SoftwareUpdate"
     for key, name in (("AutomaticCheckEnabled", "check for updates"), ("AutomaticDownload", "download updates"),
                       ("CriticalUpdateInstall", "install security fixes"), ("ConfigDataInstall", "update malware rules")):
-        if _read(["defaults", "read", pref, key]) != "1":
+        if _read(["defaults", "read", pref, key]) == "0":  # a missing key means macOS's default, which is on
             if fix:
                 prev = _read(["defaults", "read", pref, key])
                 run(["defaults", "write", pref, key, "-bool", "true"])
                 undo_argv = ["defaults", "write", pref, key, "-bool", "false"] if prev == "0" else ["defaults", "delete", pref, key]
                 ledger_add("setting", root=True, setting=f"Auto {name}: on", undo={"type": "cmd", "argv": undo_argv})
-            out.append(("fixed" if fix else "issue", f"Automatic {name} was off"))
+            out.append(("fixed" if fix else "issue", f"Automatic {name} {'was' if fix else 'is'} off (System Settings > General > Software Update)"))
     out.append(("ok" if "On" in _read(["fdesetup", "status"]) else "issue", "Disk encryption (FileVault)"))
     rl = _read(["systemsetup", "-getremotelogin"])
     if "On" in rl:
         out.append(("issue", "Remote login (SSH) is on. Turn off in System Settings > General > Sharing if unused"))
     prof = _read(["profiles", "list"])
     ids = sorted(set(re.findall(r"profileIdentifier:\s*(\S+)", prof)))
+    ids = [i for i in ids if not i.startswith("com.leviathan.")]
     if ids:
         out.append(("issue", "Settings profiles installed, check they are ones you added (System Settings > General > Device Management): " + ", ".join(ids)))
     return out
@@ -757,8 +786,7 @@ def undo_settings():
 
 
 # ---------- status + main ----------
-AI_ALERT_KINDS = ("canary-trigger", "agent-tripped", "agent-auto-pause", "agent-sensitive-access",
-                  "agent-new-connection", "agent-startup-edit", "ai-attack-alert", "tamper-alert")
+AI_ALERT_KINDS = ("canary-trigger",)
 
 def status():
     es = _entries()
@@ -788,50 +816,7 @@ def print_sweep(results):
         print(f"  {mark} {msg}")
 
 
-def main():
-    a = sys.argv[1:] or ["status"]
-    c = a[0]
-    if c == "scan-downloads":
-        scan_dir(DOWNLOADS, "downloads")
-    elif c == "scan-apps":
-        scan_dir("/Applications", "apps", only_apps=True)
-    elif c == "scan-persist":
-        scan_persist()
-    elif c == "scan-all":
-        scan_dir(DOWNLOADS, "downloads"); scan_dir("/Applications", "apps", only_apps=True); scan_persist()
-    elif c == "sweep":
-        fix = "--fix" in a
-        res = sweep_system(fix) if os.geteuid() == 0 else sweep_user(fix)
-        if "--quiet" not in a:
-            print_sweep(res)
-    elif c == "check-cmd":
-        msg = check_cmd(" ".join(a[1:]))
-        if msg:
-            print(msg)
-            ledger_add("paste-stopped", detail=" ".join(a[1:])[:300], reason=msg)
-            start_pwwatch()
-    elif c == "contain" and len(a) > 1:
-        contain(a[1], "removed by you")
-    elif c == "pwwatch":
-        pwwatch()
-    elif c == "undo" and len(a) > 1:
-        if a[1].upper().startswith("S") and not IS_ROOT:
-            print(f"System change. Run: sudo \"{ROOT_TOOL}\" undo {a[1][1:]}")
-        else:
-            undo(a[1].lstrip("Ss"))
-    elif c == "undo-settings":
-        undo_settings()
-    elif c == "scan":
-        sys.exit(1 if full_scan() else 0)
-    elif c == "verify":
-        sys.exit(0 if verify() else 1)
-    elif c == "fix-chrome-notify":
-        fix_chrome_notify()
-    else:
-        status()
-
-
-# Import levplus for new commands
+# levplus holds the AI agent watch and the installer check
 try:
     import levplus as LP
 except Exception:
@@ -860,9 +845,11 @@ def main():
             ledger_add("paste-stopped", detail=" ".join(a[1:])[:300], reason=msg)
             start_pwwatch()
     elif c == "contain" and len(a) > 1:
-        contain(a[1], "removed by you")
+        if not os.path.lexists(a[1]):
+            sys.exit("No such file: " + a[1])
+        contain(os.path.abspath(a[1]), "removed by you")
     elif c == "check" and [x for x in a[1:] if x != "--contain"]:
-        target = [x for x in a[1:] if x != "--contain"][0]
+        target = os.path.abspath([x for x in a[1:] if x != "--contain"][0])
         lvl = check_file(target)
         if lvl == "bad" and "--contain" in a:
             contain(target, "removed by you after check")
@@ -884,186 +871,46 @@ def main():
         sys.exit(0 if verify() else 1)
     elif c == "fix-chrome-notify":
         fix_chrome_notify()
-    # ---- Leviathan 2.0 commands ----
-    elif c == "level":
-        if len(a) == 1:
-            lvl = LP.get_level() if LP else 2
-            print(f"Current level: {lvl}")
-            print("Levels:")
-            print("  1 Basic: 1.0 behaviour")
-            print("  2 Standard (default): + crypto clipboard guard, recovery-phrase guard, fake password box guard")
-            print("  3 Careful: + instant startup-item alert, wallet app signature check daily")
-            print("  4 Strict: + new unsigned/ad-hoc apps from internet open in sandbox; Tor checks")
-            print("  5 Lockdown: + new unsigned apps contained until approval; outbound internet alert for new apps (lsof sample every 60s)")
-            print("Costs: more prompts, some apps break, sandboxed apps cannot see your files")
-        elif a[1] == "--json":
-            lvl = LP.get_level() if LP else 2
-            print(json.dumps({"level": lvl}))
-        else:
-            try:
-                n = int(a[1])
-                LP.set_level(n) if LP else None
-                print(f"Level set to {n}")
-            except Exception:
-                print("Usage: leviathan level [1-5]")
+    elif c == "status":
+        status()
+    elif not LP:
+        sys.exit("leviathan: levplus.py is missing; reinstall Leviathan")
     elif c == "mode":
-        if len(a) == 1:
-            modes = LP.get_modes() if LP else {"crypto": False, "apps": False, "tor": False, "agents": False}
-            for k, v in modes.items():
-                print(f"  {k}: {'on' if v else 'off'}")
-        elif a[1] == "--json":
-            modes = LP.get_modes() if LP else {"crypto": False, "apps": False, "tor": False, "agents": False}
-            print(json.dumps(modes))
-        elif len(a) >= 3:
-            name, val = a[1], a[2]
-            if name in ("crypto", "apps", "tor", "agents") and val in ("on", "off"):
-                LP.set_mode(name, val == "on") if LP else None
-                print(f"Mode {name} = {val}")
-            else:
-                print("Usage: leviathan mode <crypto|apps|tor|agents> <on|off>")
+        if len(a) >= 3 and a[1] == "agents" and a[2] in ("on", "off"):
+            LP.set_mode("agents", a[2] == "on")
+            print(f"AI agents watch: {a[2]}")
+        elif len(a) == 2 and a[1] == "--json":
+            print(json.dumps(LP.get_modes()))
+        elif len(a) == 1:
+            print(f"  agents: {'on' if LP.get_modes()['agents'] else 'off'}")
         else:
-            print("Usage: leviathan mode [crypto|apps|tor|agents] [on|off]")
-    elif c == "clip":
-        if not LP:
-            print("levplus not available")
-        else:
-            data = sys.stdin.read()
-            old = os.environ.get("LEVIATHAN_CLIP_OLD", "")
-            warn = LP.clip_check(old, data.strip())
-            if warn:
-                print(warn)
-                LP.ledger_add("clip-warning", detail=warn)
-            if LP.seed_phrase(data):
-                warn2 = "Clipboard contains a possible recovery phrase (seed phrase)."
-                print(warn2)
-                LP.ledger_add("clip-warning", detail=warn2)
-    elif c == "cost":
-        if LP:
-            print(LP.cost())
-        else:
-            print("levplus not available")
+            sys.exit("Usage: leviathan mode agents on|off")
     elif c == "note-event" and len(a) >= 3:
-        if LP:
-            print(LP.note_event(a[1], " ".join(a[2:])))
-        else:
-            print("levplus not available")
-    elif c == "sandbox" and len(a) > 1:
-        if not LP:
-            print("levplus not available")
-        else:
-            app = a[1]
-            net = "--net" in a
-            exe = app
-            if app.endswith(".app") and os.path.isdir(app):
-                try:  # the bundle names its own executable; the first file in MacOS/ may be a helper
-                    with open(os.path.join(app, "Contents/Info.plist"), "rb") as f:
-                        exe = os.path.join(app, "Contents/MacOS", plistlib.load(f)["CFBundleExecutable"])
-                except Exception:
-                    sys.exit("Not a normal app: no executable named in Info.plist")
-            if not (os.path.isfile(exe) and os.access(exe, os.X_OK)):
-                sys.exit("Cannot run: " + exe)
-            ent = subprocess.run(["/usr/bin/codesign", "-d", "--entitlements", "-", app], capture_output=True, text=True).stdout
-            if "com.apple.security.app-sandbox" in ent:  # macOS kills an app sandboxed twice
-                sys.exit("%s already runs in Apple's own sandbox (App Store rules). Open it normally." % os.path.basename(app))
-            name = os.path.basename(app.rstrip("/"))
-            name = name[:-4] if name.endswith(".app") else name
-            container = re.sub(r"[^A-Za-z0-9_-]", "_", name).strip("_") or "app"  # no dots: ".." must never reach the path
-            home = os.path.expanduser("~")
-            box = os.path.join(home, "Library/Application Support/Leviathan/sandbox", container)
-            os.makedirs(box, exist_ok=True)
-            profile_path = os.path.join(box, "profile.sb")
-            with open(profile_path, "w") as f:
-                f.write(LP.sandbox_profile(home, container, net, app))
-            log = os.path.join(box, "sandbox.log")  # a file, not a pipe: a long-running app must never block on output
-            with open(log, "w") as lf:
-                p = subprocess.Popen(["/usr/bin/sandbox-exec", "-f", profile_path, exe], stdout=lf, stderr=lf, start_new_session=True)
-            try:
-                p.wait(timeout=2)
-                err = open(log, errors="replace").read().strip()[-400:]
-                sys.exit("Sandbox could not start it: " + (err or "exit code %d" % p.returncode))
-            except subprocess.TimeoutExpired:
-                print("Started %s in a sandbox: no access to your files%s. Its own folder: %s" % (os.path.basename(app), "" if net else " or the internet", box))
+        print(LP.note_event(a[1], " ".join(a[2:])))
     elif c == "pkg" and len(a) > 1:
-        if LP:
-            print(LP.pkg_inspect(a[1]))
-        else:
-            print("levplus not available")
-    elif c == "snapshot":
-        if LP:
-            print(LP.snapshot())
-        else:
-            print("levplus not available")
-    elif c == "diff":
-        if LP:
-            do_undo = "--undo" in a
-            print(LP.diff(undo=do_undo))
-        else:
-            print("levplus not available")
+        print(LP.pkg_inspect(a[1]))
     elif c == "agents":
-        if not LP:
-            print("levplus not available")
-        elif len(a) > 1 and a[1] in ("pause", "resume"):
-            print(LP.agents_pause() if a[1] == "pause" else LP.agents_resume())
-        elif len(a) > 1 and a[1] == "canary":
-            if len(a) > 2 and a[2] == "on":
-                print(LP.agents_canary_on())
-            else:
-                print(LP.agents_check())
-        elif len(a) > 1 and a[1] == "config":
+        sub = a[1] if len(a) > 1 else ""
+        if sub in ("pause", "resume"):
+            print(LP.agents_pause() if sub == "pause" else LP.agents_resume())
+        elif sub == "canary":
+            print(LP.agents_canary_on() if a[2:3] == ["on"] else LP.agents_check())
+        elif sub == "config":
             print(LP.agents_config_audit())
-        elif len(a) > 1 and a[1] == "tripped":
-            print(LP.agents_tripped())
-        elif len(a) > 1 and a[1] == "level":
-            if len(a) == 2:
-                lvl = LP.get_agent_level()
-                print(f"Current agent level: {lvl}")
-                print("Levels:")
-                for k, v in LP.agent_level_costs().items():
-                    print(f"  {k}: {v}")
-            elif a[2] in ("1", "2", "3"):
-                LP.set_agent_level(int(a[2]))
-                print(f"Agent level set to {a[2]}")
-            else:
-                print("Usage: leviathan agents level [1|2|3]")
-        elif len(a) > 1 and a[1] == "run":
-            if len(a) > 2:
-                print(LP.agents_run(a[2:]))
-            else:
-                print("Usage: leviathan agents run <command> [args...]")
-        elif len(a) > 1 and a[1] == "export":
-            if "--jsonl" in a:
-                print(LP.agents_export_jsonl())
-            else:
-                print("Usage: leviathan agents export --jsonl")
-        elif len(a) > 1 and a[1] == "monitor":
+        elif sub == "monitor":
             print(LP.agents_monitor())
-        elif len(a) > 1 and a[1] == "whois":
-            print(LP.agents_whois(a[2]) if len(a) > 2 else "Usage: leviathan agents whois <code>")
-        else:
-            procs = LP.agent_procs() if LP else []
+        elif sub == "":
+            procs = LP.agent_procs()
             for pid, name in procs:
                 print(f"  {pid}  {name}")
             if not procs:
                 print("No AI agent processes found.")
-    elif c == "ai":
-        if not LP:
-            print("levplus not available")
-        elif len(a) > 1 and a[1] == "safety":
-            print(LP.ai_safety_check())
-        elif len(a) > 1 and a[1] == "tuneup":
-            fix = "--fix" in a
-            print(LP.ai_tuneup(fix=fix))
         else:
-            print("Usage: leviathan ai <safety|tuneup [--fix]>")
-    elif c == "tor":
-        print(LP.tor_check() if LP else "levplus not available")
-    elif c == "wallets":
-        r = LP.wallet_apps() if LP else "levplus not available"
-        print("\n".join(map(str, r)) if isinstance(r, list) else r)
-    elif c == "status":
-        status()
+            sys.exit("Usage: leviathan agents [pause|resume|canary [on]|config|monitor]")
+    elif c == "ai" and a[1:2] == ["safety"]:
+        print(LP.ai_safety_check())
     else:
-        sys.exit("leviathan: unknown command or missing argument: %s\nCommands: see the top of leviathan.py or the README" % " ".join(a))
+        sys.exit("leviathan: unknown command or missing argument: %s\nCommands: see the README" % " ".join(a))
 
 if __name__ == "__main__":
     main()

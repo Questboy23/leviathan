@@ -1,5 +1,5 @@
 #!/bin/bash
-# Double-click installer. First time: right-click, Open (macOS asks once because it is downloaded).
+# Double-click installer. The first time, macOS blocks it: open System Settings > Privacy & Security and click Open Anyway.
 cd "$(dirname "$0")" || exit 1
 bash ./install.sh
 echo

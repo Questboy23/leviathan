@@ -68,3 +68,6 @@ No self-hosted VPN server (costs monthly, ties traffic to one rented IP, adds no
 VPN control (`leviathan vpn`) was removed at the owner's request.
 
 Removed in 2.0.9: the menu bar clipboard guard (lines 13 and 41 above). Every copy opened an empty warning, and the crypto-swap check never received the previous clipboard. Copying is silent.
+
+## 2.1.0 (2026-11-17)
+Cut: levels, crypto/apps/tor modes, clipboard guard, bip39, wallets, tor check, sandbox, snapshot/diff, cost, export, agent levels and agents run, tripwire and whois, ai tuneup, ai attack alert, tamper alert, new-connection and startup-edit alerts, skill banners, dnscrypt root filter and dnswatch. Website filter is now a DNS-over-HTTPS profile (Cloudflare 1.1.1.2). Paste guard: trusted-URL exemption limited to download rules; base64 and python rules narrowed. contain stores absolute paths.

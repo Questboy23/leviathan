@@ -11,14 +11,8 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
 
     let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     let menu = NSMenu()
-    var levelItems: [Int: NSMenuItem] = [:]
-    var modeItems: [String: NSMenuItem] = [:]
-    var agentLevelItems: [Int: NSMenuItem] = [:]
-    var passwordBoxTimer: Timer?
-    var alertTimer: Timer?
-    var level: Int = 2
-    var modes: [String: Bool] = ["crypto": false, "apps": false, "tor": false, "agents": false]
-    var agentLevel: Int = 2
+    var watchAgents = false
+    var filterOn: Bool? = nil     // nil until the first background check; nil also when offline
     var hasUnreadAlert: Bool = false
     var activeTasks = 0          // menu actions still running (main thread only)
     var backgroundBusy = false   // a Leviathan scan or check started by its background jobs is running
@@ -38,6 +32,7 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
         requestNotificationAuth()
         checkNotificationAuth()
         startPasswordBoxMonitor()
+        startFilterCheck()
         refreshStatus()
     }
 
@@ -82,25 +77,20 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
         refreshStatus()
     }
 
-    /// Reads ~/.leviathan/settings.json directly (the file `leviathan level` and `leviathan mode` write),
-    /// then rebuilds the menu. Main thread only. Defaults match leviathan.py: level 2, agent level 2.
+    /// Reads ~/.leviathan/settings.json directly (the file `leviathan mode agents on|off` writes),
+    /// then rebuilds the menu. Main thread only.
     func refreshStatus() {
         let installed = FileManager.default.fileExists(atPath: leviathanBin)
         let url = URL(fileURLWithPath: NSHomeDirectory() + "/.leviathan/settings.json")
         if let data = try? Data(contentsOf: url),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            level = json["level"] as? Int ?? 2
-            agentLevel = json["agent_level"] as? Int ?? 2
-            var newModes: [String: Bool] = ["crypto": false, "apps": false, "tor": false, "agents": false]
-            for (k, v) in json["modes"] as? [String: Any] ?? [:] { if let b = v as? Bool { newModes[k] = b } }
-            modes = newModes
+            watchAgents = (json["modes"] as? [String: Any])?["agents"] as? Bool ?? false
         }
         updateMenu(installed: installed)
     }
 
     func updateMenu(installed: Bool) {
         menu.removeAllItems()
-
         if !installed {
             let item = NSMenuItem(title: "Leviathan not installed", action: nil, keyEquivalent: "")
             item.isEnabled = false
@@ -109,239 +99,73 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
             addQuitItem()
             return
         }
-
-        // Shield status line
-        let statusItem = NSMenuItem(title: "Leviathan • Level \(level) • \(modeSummary())", action: nil, keyEquivalent: "")
-        statusItem.isEnabled = false
-        menu.addItem(statusItem)
-        // The website filter is the half that needs your password; say so when it is not installed.
-        if !FileManager.default.fileExists(atPath: "/Library/LaunchDaemons/com.leviathan.dnscrypt.plist") {
-            let f = NSMenuItem(title: "⚠︎ Website filter is off. Turn it on…", action: #selector(turnOnFilter), keyEquivalent: "")
-            f.target = self
-            menu.addItem(f)
+        let head = NSMenuItem(title: "Leviathan is on" + (watchAgents ? " • watching AI agents" : ""), action: nil, keyEquivalent: "")
+        head.isEnabled = false
+        menu.addItem(head)
+        if filterOn == false {
+            add("⚠︎ Turn on website filter…", #selector(turnOnFilter))
         }
         menu.addItem(NSMenuItem.separator())
-
-        // Level 1-5 with checkmarks
-        addLevelMenu()
+        let watch = add("Watch AI agents", #selector(toggleAgents))
+        watch.state = watchAgents ? .on : .off
+        add("Pause all AI agents", #selector(pauseAgents))
+        add("Resume all AI agents", #selector(resumeAgents))
+        add("AI safety check", #selector(runAISafety))
         menu.addItem(NSMenuItem.separator())
-
-        // "I'm using:" with checkmarks
-        addUsingMenu()
-        menu.addItem(NSMenuItem.separator())
-
-        // AI Safety card
-        addAISafetyMenu()
-        menu.addItem(NSMenuItem.separator())
-
-        // AI Tune-up card
-        addAITuneupMenu()
-        menu.addItem(NSMenuItem.separator())
-
-        // Actions
-        addActionMenu()
+        add("Check installer…", #selector(checkInstaller))
+        add("Recent activity", #selector(showRecentActivity))
+        add("Run full scan", #selector(runFullScan))
         menu.addItem(NSMenuItem.separator())
         addQuitItem()
     }
 
-    func modeSummary() -> String {
-        let active = modes.filter { $0.value }.keys.joined(separator: ", ")
-        return active.isEmpty ? "no modes" : active
+    @discardableResult func add(_ title: String, _ action: Selector) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        menu.addItem(item)
+        return item
     }
 
-    func addLevelMenu() {
-        let submenu = NSMenu()
-        for lvl in 1...5 {
-            let item = NSMenuItem(title: "Level \(lvl): \(levelName(lvl))", action: #selector(setLevel(_:)), keyEquivalent: "")
-            item.target = self
-            item.tag = lvl
-            item.state = lvl == level ? .on : .off
-            submenu.addItem(item)
-            levelItems[lvl] = item
-        }
-        let parent = NSMenuItem(title: "Level", action: nil, keyEquivalent: "")
-        menu.setSubmenu(submenu, for: parent)
-        menu.addItem(parent)
-    }
-
-    func levelName(_ lvl: Int) -> String {
-        switch lvl {
-        case 1: return "Basic"
-        case 2: return "Standard"
-        case 3: return "Careful"
-        case 4: return "Strict"
-        case 5: return "Lockdown"
-        default: return ""
-        }
-    }
-
-    @objc func setLevel(_ sender: NSMenuItem) {
-        level = sender.tag  // checkmark moves at once; the file is written by the CLI below
-        runCLIAsync(["level", "\(sender.tag)"]) { [weak self] output in
-            if output.contains("error") || output.contains("Error") {
-                self?.showAlert("Failed to set level", output)
-            } else {
-                self?.refreshStatus()
-            }
-        }
-    }
-
-    func addUsingMenu() {
-        let modeOrder = [("crypto", "Crypto"), ("apps", "Untrusted apps"), ("tor", "Tor"), ("agents", "AI agents")]
-        let submenu = NSMenu()
-        for (key, label) in modeOrder {
-            let item = NSMenuItem(title: label, action: #selector(toggleMode(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = key
-            item.state = modes[key] == true ? .on : .off
-            submenu.addItem(item)
-            modeItems[key] = item
-        }
-        let parent = NSMenuItem(title: "I'm using:", action: nil, keyEquivalent: "")
-        menu.setSubmenu(submenu, for: parent)
-        menu.addItem(parent)
-    }
-
-    @objc func toggleMode(_ sender: NSMenuItem) {
-        guard let key = sender.representedObject as? String else { return }
-        let newState = modes[key] != true
-        modes[key] = newState
-        runCLIAsync(["mode", key, newState ? "on" : "off"]) { [weak self] output in
-            if output.contains("error") || output.contains("Error") {
-                self?.showAlert("Failed to toggle mode", output)
-            } else {
-                self?.refreshStatus()
-            }
-        }
-    }
-
-    func addAISafetyMenu() {
-        let submenu = NSMenu()
-
-        // Agent level submenu
-        let levelSubmenu = NSMenu()
-        for lvl in 1...3 {
-            let item = NSMenuItem(title: "Level \(lvl): \(agentLevelName(lvl))", action: #selector(setAgentLevel(_:)), keyEquivalent: "")
-            item.target = self
-            item.tag = lvl
-            item.state = lvl == agentLevel ? .on : .off
-            levelSubmenu.addItem(item)
-            agentLevelItems[lvl] = item
-        }
-        let levelParent = NSMenuItem(title: "Agent guard level", action: nil, keyEquivalent: "")
-        submenu.setSubmenu(levelSubmenu, for: levelParent)
-        submenu.addItem(levelParent)
-
-        submenu.addItem(NSMenuItem.separator())
-
-        let pauseItem = NSMenuItem(title: "Pause all AI agents", action: #selector(pauseAgents), keyEquivalent: "")
-        pauseItem.target = self
-        submenu.addItem(pauseItem)
-
-        let resumeItem = NSMenuItem(title: "Resume all AI agents", action: #selector(resumeAgents), keyEquivalent: "")
-        resumeItem.target = self
-        submenu.addItem(resumeItem)
-
-        let parent = NSMenuItem(title: "AI Safety", action: nil, keyEquivalent: "")
-        menu.setSubmenu(submenu, for: parent)
-        menu.addItem(parent)
-    }
-
-    func agentLevelName(_ lvl: Int) -> String {
-        switch lvl {
-        case 1: return "Watch"
-        case 2: return "Guard"
-        case 3: return "Lockdown"
-        default: return ""
-        }
-    }
-
-    func updateAgentLevelChecks() {
-        for lvl in 1...3 {
-            agentLevelItems[lvl]?.state = lvl == agentLevel ? .on : .off
-        }
-    }
-
-    @objc func setAgentLevel(_ sender: NSMenuItem) {
-        agentLevel = sender.tag
-        runCLIAsync(["agents", "level", "\(sender.tag)"]) { [weak self] output in
-            if output.contains("error") || output.contains("Error") {
-                self?.showAlert("Failed to set agent level", output)
-            } else {
-                self?.refreshStatus()
-            }
-        }
+    @objc func toggleAgents() {
+        watchAgents.toggle()  // checkmark moves at once; the CLI writes the file
+        runCLIAsync(["mode", "agents", watchAgents ? "on" : "off"]) { [weak self] _ in self?.refreshStatus() }
     }
 
     @objc func pauseAgents() {
-        runCLIAsync(["agents", "pause"]) { [weak self] output in
-            self?.showResult("Pause agents", output)
-        }
+        runCLIAsync(["agents", "pause"]) { [weak self] output in self?.showResult("Pause agents", output) }
     }
 
     @objc func resumeAgents() {
-        runCLIAsync(["agents", "resume"]) { [weak self] output in
-            self?.showResult("Resume agents", output)
+        runCLIAsync(["agents", "resume"]) { [weak self] output in self?.showResult("Resume agents", output) }
+    }
+
+    @objc func runAISafety() {
+        runCLIAsync(["ai", "safety"], timeout: 60) { [weak self] output in self?.showResult("AI safety check", output) }
+    }
+
+    /// The filter is on when this Mac's DNS answers 0.0.0.0 for Cloudflare's malware test name. Checked every 5 minutes off the main thread.
+    func startFilterCheck() {
+        let t = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        t.schedule(deadline: .now() + 2, repeating: 300.0)
+        t.setEventHandler { [weak self] in
+            guard let self = self else { return }
+            let out = self.runCLI(["-q", "host", "-a", "name", "malware.testcategory.com"], timeout: 10, exe: "/usr/bin/dscacheutil")
+            let on: Bool? = out.contains("0.0.0.0") ? true : (out.contains("ip_address") ? false : nil)
+            DispatchQueue.main.async { self.filterOn = on }
         }
+        t.resume()
+        filterSource = t
     }
+    var filterSource: DispatchSourceTimer?
 
-    func addAITuneupMenu() {
-        let submenu = NSMenu()
-
-        let runItem = NSMenuItem(title: "Run check", action: #selector(runAITuneup), keyEquivalent: "")
-        runItem.target = self
-        submenu.addItem(runItem)
-
-        let parent = NSMenuItem(title: "AI Tune-up", action: nil, keyEquivalent: "")
-        menu.setSubmenu(submenu, for: parent)
-        menu.addItem(parent)
-    }
-
-    @objc func runAITuneup() {
-        runCLIAsync(["ai", "tuneup"], timeout: 120) { [weak self] output in
-            self?.showResult("AI Tune-up", output)
-        }
-    }
-
-    // Opens the fix in Terminal, where macOS asks for the password. Nothing here sees the password.
+    /// Opens the profile (macOS adds it to System Settings) and the pane where you click Install. Nothing here sees your password.
     @objc func turnOnFilter() {
-        let script = URL(fileURLWithPath: NSHomeDirectory() + "/.leviathan/bin/fix-filter.command")
-        let terminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
-        NSWorkspace.shared.open([script], withApplicationAt: terminal, configuration: NSWorkspace.OpenConfiguration()) { [weak self] _, err in
-            if let err = err { self?.showAlert("Could not open Terminal", "Run this in Terminal instead: bash ~/.leviathan/bin/fix-filter.command\n\n\(err.localizedDescription)") }
+        let profile = URL(fileURLWithPath: NSHomeDirectory() + "/.leviathan/bin/website-filter.mobileconfig")
+        NSWorkspace.shared.open(profile)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+            if let pane = URL(string: "x-apple.systempreferences:com.apple.Profiles-Settings.extension") { NSWorkspace.shared.open(pane) }
         }
-    }
-
-    func addActionMenu() {
-        let sandboxItem = NSMenuItem(title: "Open app in sandbox…", action: #selector(openInSandbox), keyEquivalent: "")
-        sandboxItem.target = self
-        menu.addItem(sandboxItem)
-
-        let pkgItem = NSMenuItem(title: "Check installer…", action: #selector(checkInstaller), keyEquivalent: "")
-        pkgItem.target = self
-        menu.addItem(pkgItem)
-
-        let activityItem = NSMenuItem(title: "Recent activity", action: #selector(showRecentActivity), keyEquivalent: "")
-        activityItem.target = self
-        menu.addItem(activityItem)
-
-        let scanItem = NSMenuItem(title: "Run full scan", action: #selector(runFullScan), keyEquivalent: "")
-        scanItem.target = self
-        menu.addItem(scanItem)
-    }
-
-    @objc func openInSandbox() {
-        let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        panel.canChooseFiles = true
-        panel.allowedContentTypes = [.application]
-        panel.message = "Select an app to open in sandbox"
-        if panel.runModal() == .OK, let url = panel.url {
-            runCLIAsync(["sandbox", url.path]) { [weak self] output in
-                self?.showResult("Open in sandbox", output)
-            }
-        }
+        showAlert("Website filter", "System Settings is opening. Double-click \"Leviathan website filter\", click Install, and enter your Mac password. To remove it later, select it there and click the minus button.")
     }
 
     @objc func checkInstaller() {
@@ -379,7 +203,7 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
     var cleanOsascript = Set<String>()  // already checked and harmless: skip re-reading its script every 3 s
 
     // Background scans and checks that turn the shield green while they run.
-    static let busyArgs = [" scan", " scan-all", " scan-apps", " scan-persist", " scan-downloads", " agents monitor", " sweep", " ai tuneup", " pkg ", " check "]
+    static let busyArgs = [" scan", " scan-all", " scan-apps", " scan-persist", " scan-downloads", " agents monitor", " sweep", " ai safety", " pkg ", " check "]
 
     func checkPasswordBoxes() {
         let result = runCLI(["-axwwo", "pid=,ppid=,command="], timeout: 5, exe: "/bin/ps")  // ww: full command lines, or a long inline script is cut before the part that matters
@@ -394,7 +218,6 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
             self.backgroundBusy = busy
             self.updateIconColor()
         }
-        guard level >= 2 else { return }
         var killed: [String] = []
         for (pid, pr) in procs {
             let prog = (String(pr.cmd.split(separator: " ").first ?? "") as NSString).lastPathComponent

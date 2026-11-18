@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>PayloadContent</key>
+  <array>
+    <dict>
+      <key>DNSSettings</key>
+      <dict>
+        <key>DNSProtocol</key><string>HTTPS</string>
+        <key>ServerURL</key><string>https://security.cloudflare-dns.com/dns-query</string>
+        <key>ServerAddresses</key>
+        <array>
+          <string>1.1.1.2</string><string>1.0.0.2</string>
+          <string>2606:4700:4700::1112</string><string>2606:4700:4700::1002</string>
+        </array>
+      </dict>
+      <key>PayloadDisplayName</key><string>Leviathan website filter</string>
+      <key>PayloadIdentifier</key><string>com.leviathan.webfilter.dns</string>
+      <key>PayloadType</key><string>com.apple.dnsSettings.managed</string>
+      <key>PayloadUUID</key><string>6F1D2C3A-8B4E-4E7A-9C1D-2A5B7E9F0C11</string>
+      <key>PayloadVersion</key><integer>1</integer>
+    </dict>
+  </array>
+  <key>PayloadDescription</key><string>Blocks known malware and phishing websites using Cloudflare's security DNS (1.1.1.2), encrypted. Remove it any time in System Settings, Privacy and Security, Profiles.</string>
+  <key>PayloadDisplayName</key><string>Leviathan website filter</string>
+  <key>PayloadIdentifier</key><string>com.leviathan.webfilter</string>
+  <key>PayloadRemovalDisallowed</key><false/>
+  <key>PayloadScope</key><string>System</string>
+  <key>PayloadType</key><string>Configuration</string>
+  <key>PayloadUUID</key><string>0B7C1E44-3D2A-4F5B-8E6C-9A1D3F5B7C22</string>
+  <key>PayloadVersion</key><integer>1</integer>
+</dict>
+</plist>

