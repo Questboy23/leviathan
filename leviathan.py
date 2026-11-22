@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-"""Leviathan: stops viruses before they run on a Mac, keeps AI agents in check, and turns on a VPN on
-networks you don't trust. Every action is logged and undoable.
-Commands: scan | scan-downloads | scan-apps | scan-persist | check-cmd CMD | pwwatch | undo ID | status | verify |
-          contain PATH | check PATH [--contain] | purge | safebox open|wrap APP | safebox list |
-          vpn [on|off|auto|check|trust|untrust]"""
+"""Leviathan 4.0: stops viruses before they run on a Mac. Every action is logged and undoable.
+Commands: scan | scan-downloads | scan-apps | scan-persist | check-cmd CMD | check PATH [--contain] | pkg FILE.pkg |
+          contain PATH | undo ID | status | verify | purge"""
 import datetime, hashlib, json, os, plistlib, re, shlex, shutil, subprocess, sys, time
 
 os.umask(0o077)  # the log and quarantine are readable by you only
@@ -250,7 +248,6 @@ def contain(path, reason, after=None):
     i = ledger_add("contained", path=path, reason=reason,
                    undo={"type": "move", "src": dst, "dst": path, "modes": modes, "after": after or []})
     notify(f"Moved a virus to the Trash: {os.path.basename(path)}. It can't run there. Undo: leviathan undo {i}")
-    start_pwwatch()
     return i
 
 
@@ -299,7 +296,6 @@ def check_file(path):
 def note(path, reason):
     """Unsigned is not malware. It is never moved or labeled, only noted in the private log."""
     ledger_add("noticed", path=path, reason=reason)
-    start_pwwatch()  # fake password boxes often follow an unsigned download
 
 
 def undo(i):
@@ -384,10 +380,7 @@ def scan_dir(folder, key, only_apps=False):
         if level == "bad":
             contain(p, why)
         elif level == "unverified" and not first:
-            if p.endswith(".app") and quarantined(p) and safebox_wrap(p, why):
-                known[n] = str(os.stat(p).st_mtime)  # the launcher now at p is ours
-            else:
-                note(p, why)
+            note(p, why)
     _save_seen(seen)
 
 
@@ -462,51 +455,13 @@ def scan_persist():
     _save_seen(seen)
 
 
-# ---------- fake password box watch ----------
-PW_LOCK = os.path.join(STATE, "pwwatch.until")
-
-
-def start_pwwatch(seconds=900):
-    try:
-        os.makedirs(STATE, exist_ok=True)
-        until = time.time() + seconds
-        running = os.path.exists(PW_LOCK) and float(open(PW_LOCK).read() or 0) > time.time()
-        with open(PW_LOCK, "w") as f:
-            f.write(str(until))
-        if not running and not os.environ.get("LEVIATHAN_NO_SPAWN"):
-            subprocess.Popen([sys.executable, os.path.abspath(__file__), "pwwatch"],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-    except Exception:
-        pass
-
-
-FAKE_PW = re.compile(r"osascript.*(hidden answer|with hidden).*", re.I)
-
-
-def pwwatch():
-    while True:
-        try:
-            until = float(open(PW_LOCK).read() or 0)
-        except Exception:
-            until = 0
-        if time.time() > until:
-            break
-        code, out = run(["ps", "-axo", "pid=,command="])
-        for line in out.splitlines():
-            line = line.strip()
-            if FAKE_PW.search(line) and "leviathan" not in line:
-                pid = line.split()[0]
-                run(["kill", "-9", pid])
-                ledger_add("blocked", what="fake password box", detail=line[:300])
-                notify("Blocked a fake password box. Don't type your password into pop-ups you didn't expect.")
-        time.sleep(2)
-
-
-# ---------- paste guard explanations ----------
+# ---------- paste guard ----------
 TRUSTED_INSTALLERS = ("raw.githubusercontent.com/homebrew/", "brew.sh/", "sh.rustup.rs/", "astral.sh/",
                       "bun.sh/", "deno.land/", "claude.ai/install", "ollama.com/install", "get.pnpm.io/",
                       "raw.githubusercontent.com/nvm-sh/", "install.python-poetry.org/", "fly.io/install",
                       "cli.github.com/", "sdk.cloud.google.com/")
+
+
 
 
 def _trusted(u):
@@ -683,224 +638,6 @@ def status():
 
 
 
-# ---------- Safe Box: apps Apple never checked run with no access to your files ----------
-SAFEBOX = os.path.join(STATE, "safebox")
-# Folders a Safe Box app can never open, even inside its own box rules (last matching rule wins).
-SECRET_DIRS = (".ssh", ".aws", ".gnupg", ".config/gh", "Library/Keychains", "Library/Cookies", "Library/Safari",
-               "Library/Mail", "Library/Messages",
-               "Library/Application Support/Google/Chrome", "Library/Application Support/Firefox",
-               "Library/Application Support/BraveSoftware", "Library/Application Support/Arc",
-               "Library/Application Support/Ledger Live", "Library/Application Support/Exodus",
-               "Library/Application Support/Electrum", "Library/Application Support/@trezor",
-               "Library/Application Support/Sparrow", "Library/Application Support/Bitcoin")
-
-
-LAUNCHER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "safebox", "leviathan-safebox")
-
-
-def quarantined(path):
-    """True when macOS marked the file as downloaded from the internet (apps you built yourself have no mark)."""
-    return run(["xattr", "-p", "com.apple.quarantine", path])[0] == 0
-
-
-def _sb(path):
-    return json.dumps(path)  # a sandbox-profile string literal uses the same quoting as JSON
-
-
-def safebox_profile(home, box, app):
-    """Pure function: sandbox-exec profile text. macOS stays readable so the app starts; your home folder is
-    closed except the app's own box; secret folders, password prompts and the keychain tool are blocked.
-    In sandbox profiles the LAST matching rule wins, so the denies come first and the allows after."""
-    home = os.path.realpath(home)  # sandbox rules match real paths, not symlinks
-    lines = ["(version 1)", "(allow default)",
-             f"(deny file-read* file-write* (subpath {_sb(home)}))",
-             "(deny file-write* (subpath \"/Library\") (subpath \"/Applications\") (subpath \"/usr/local\") (subpath \"/opt\"))",
-             f"(allow file-read* file-write* (subpath {_sb(os.path.realpath(box))}))",
-             f"(allow file-read* (subpath {_sb(os.path.realpath(app))}))"]
-    lines += [f"(deny file-read* file-write* (subpath {_sb(os.path.join(home, d))}))" for d in SECRET_DIRS]
-    lines += ['(deny process-exec (literal "/usr/bin/osascript") (literal "/usr/bin/security") (literal "/usr/bin/sudo")'
-              ' (literal "/bin/launchctl") (literal "/usr/bin/xattr") (literal "/usr/sbin/spctl"))']
-    return "\n".join(lines) + "\n"
-
-
-def _box_for(app):
-    name = os.path.basename(app.rstrip("/"))
-    name = name[:-4] if name.endswith(".app") else name
-    return os.path.join(SAFEBOX, re.sub(r"[^A-Za-z0-9_-]", "_", name).strip("_") or "app")  # no dots: ".." never reaches the path
-
-
-def safebox_wrap(path, why):
-    """Moves a downloaded app Apple never checked into its Safe Box and puts a launcher with the same name where it
-    was, so it opens from the Dock, Finder and Launchpad as before but can't see your files. Undo restores it."""
-    if not path.endswith(".app") or not os.path.isdir(path):
-        return False
-    box = _box_for(path)
-    real = os.path.join(box, "app", os.path.basename(path))
-    if os.path.lexists(real):
-        return False
-    try:
-        info = plistlib.load(open(os.path.join(path, "Contents/Info.plist"), "rb"))
-        os.makedirs(os.path.dirname(real), exist_ok=True)
-        shutil.move(path, real)
-    except Exception:
-        return False
-    try:
-        os.makedirs(os.path.join(path, "Contents/MacOS"))
-        os.makedirs(os.path.join(path, "Contents/Resources"))
-        icon = info.get("CFBundleIconFile", "")
-        icon = icon if icon.endswith(".icns") or not icon else icon + ".icns"
-        if icon and os.path.exists(os.path.join(real, "Contents/Resources", icon)):
-            shutil.copy2(os.path.join(real, "Contents/Resources", icon), os.path.join(path, "Contents/Resources", icon))
-        name = info.get("CFBundleName") or os.path.basename(path)[:-4]
-        with open(os.path.join(path, "Contents/Info.plist"), "wb") as f:
-            plistlib.dump({"CFBundleExecutable": "leviathan-safebox", "CFBundleIdentifier": "com.leviathan.safebox." + os.path.basename(box),
-                           "CFBundleName": name, "CFBundlePackageType": "APPL", "CFBundleIconFile": icon,
-                           "CFBundleShortVersionString": info.get("CFBundleShortVersionString", "1")}, f)
-        # A small compiled launcher (safebox/launcher.c): Finder and the Dock refuse to open a bundle whose program is a script.
-        shutil.copy2(LAUNCHER, os.path.join(path, "Contents/MacOS/leviathan-safebox"))
-        with open(os.path.join(path, "Contents/Resources/run.sh"), "w") as f:
-            f.write("exec %s %s safebox open --exec %s\n" % (shlex.quote(sys.executable), shlex.quote(os.path.abspath(__file__)), shlex.quote(real)))
-        run(["codesign", "--force", "--sign", "-", path], timeout=30)
-    except Exception:
-        shutil.rmtree(path, ignore_errors=True)
-        shutil.move(real, path)
-        return False
-    i = ledger_add("safeboxed", path=path, reason=why, undo={"type": "move", "src": real, "dst": path, "remove": path})
-    notify(f"{os.path.basename(path)[:-4]} will open in a Safe Box: it can't see your files or passwords. Undo: leviathan undo {i}")
-    return True
-
-
-def safebox_open(app, exec_=False):
-    try:  # the bundle names its own executable; the first file in MacOS/ may be a helper
-        with open(os.path.join(app, "Contents/Info.plist"), "rb") as f:
-            exe = os.path.join(app, "Contents/MacOS", plistlib.load(f)["CFBundleExecutable"])
-    except Exception:
-        sys.exit("Not a normal app: no executable named in Info.plist")
-    if not (os.path.isfile(exe) and os.access(exe, os.X_OK)):
-        sys.exit("Cannot run: " + exe)
-    if "com.apple.security.app-sandbox" in run(["codesign", "-d", "--entitlements", "-", app])[1]:
-        os.execv("/usr/bin/open", ["open", "-a", app])  # Apple's own sandbox already applies; macOS kills an app sandboxed twice
-    box = _box_for(app)
-    fake_home = os.path.join(box, "home")
-    os.makedirs(fake_home, exist_ok=True)
-    profile = os.path.join(box, "profile.sb")
-    with open(profile, "w") as f:
-        f.write(safebox_profile(HOME, box, app))
-    env = {k: v for k, v in os.environ.items() if k in ("PATH", "LANG", "TERM", "TMPDIR", "USER", "LOGNAME", "SHELL")}
-    env.update(HOME=fake_home, CFFIXED_USER_HOME=fake_home)  # the app's settings and saves go to its box
-    argv = ["/usr/bin/sandbox-exec", "-f", profile, exe]
-    if exec_:
-        os.execve(argv[0], argv, env)
-    log = os.path.join(box, "safebox.log")  # a file, not a pipe: a long-running app must never block on output
-    with open(log, "w") as lf:
-        p = subprocess.Popen(argv, env=env, stdout=lf, stderr=lf, start_new_session=True)
-    try:
-        p.wait(timeout=2)
-        sys.exit("Safe Box could not start it: " + (open(log, errors="replace").read().strip()[-400:] or "exit code %d" % p.returncode))
-    except subprocess.TimeoutExpired:
-        print(f"Started {os.path.basename(app)} in a Safe Box. It can't see your files. Its own folder: {fake_home}")
-
-
-# ---------- VPN: Cloudflare WARP (free), on automatically on networks you haven't trusted ----------
-VPN_FILE = os.path.join(STATE, "vpn.json")
-WARP = next((p for p in ("/usr/local/bin/warp-cli", "/opt/homebrew/bin/warp-cli") if os.path.exists(p)), shutil.which("warp-cli"))
-
-
-def vpn_state():
-    try:
-        st = json.load(open(VPN_FILE))
-    except Exception:
-        st = {}
-    st.setdefault("mode", "auto")
-    st.setdefault("trusted", [])
-    return st
-
-
-def _vpn_save(st):
-    os.makedirs(STATE, exist_ok=True)
-    with open(VPN_FILE, "w") as f:
-        json.dump(st, f)
-
-
-def network_id():
-    """The router's hardware address, which stays the same while the VPN is up (the network name needs Location access)."""
-    for dev in ("en0", "en1", "en2", "en3"):
-        router = run(["ipconfig", "getoption", dev, "router"], timeout=5)[1].strip()
-        if re.fullmatch(r"\d+\.\d+\.\d+\.\d+", router):
-            m = re.search(r" at ([0-9a-f:]{11,17}) ", run(["arp", "-n", router], timeout=5)[1])
-            if m:
-                return m.group(1)
-    return None
-
-
-def _warp(*args):
-    return run([WARP, "--accept-tos"] + list(args), timeout=30)
-
-
-def vpn_connected():
-    return bool(WARP) and "Connected" in _warp("status")[1]
-
-
-def _vpn_up():
-    if _warp("registration", "show")[0] != 0:
-        _warp("registration", "new")
-    _warp("dns", "families", "off")  # Cloudflare's malware filter blocks legal adult sites; the Quad9 website filter covers malware
-    _warp("connect")
-
-
-def vpn_check():
-    """Run by com.leviathan.vpnwatch whenever the network changes."""
-    st = vpn_state()
-    if not WARP:
-        return "VPN needs Cloudflare WARP (free). Install: brew install --cask cloudflare-warp"
-    if st["mode"] == "off":
-        return "VPN is off."
-    net = network_id()
-    want = st["mode"] == "on" or net not in st["trusted"]
-    if want and not vpn_connected():
-        _vpn_up()
-        ledger_add("vpn", what="VPN on", reason="untrusted network" if st["mode"] == "auto" else "always on")
-    elif not want and vpn_connected():
-        _warp("disconnect")
-        ledger_add("vpn", what="VPN off", reason="trusted network")
-    return vpn_status()
-
-
-def vpn_set(mode):
-    st = vpn_state()
-    st["mode"] = mode
-    _vpn_save(st)
-    if mode == "off" and WARP:
-        _warp("disconnect")
-    return vpn_check()
-
-
-def vpn_trust(on):
-    st, net = vpn_state(), network_id()
-    if not net:
-        return "Not connected to a network."
-    st["trusted"] = [t for t in st["trusted"] if t != net] + ([net] if on else [])
-    _vpn_save(st)
-    return vpn_check()
-
-
-def vpn_status():
-    st = vpn_state()
-    if not WARP:
-        return "VPN: not installed. Install Cloudflare WARP (free): brew install --cask cloudflare-warp"
-    trace = run(["curl", "-s", "--max-time", "5", "https://www.cloudflare.com/cdn-cgi/trace"], timeout=8)[1]
-    m = re.search(r"^warp=(\w+)", trace, re.M)
-    real = {"on": "on", "plus": "on", "off": "off"}.get(m.group(1) if m else "", "unknown (offline)")
-    here = "trusted" if network_id() in st["trusted"] else "not trusted"
-    return f"VPN: {real}. Mode: {st['mode']}. This network: {here}."
-
-
-# levplus holds the AI agent watch and the installer check
-try:
-    import levplus as LP
-except Exception:
-    LP = None
-
 def main():
     a = sys.argv[1:] or ["status"]
     c = a[0]
@@ -917,7 +654,6 @@ def main():
         if msg:
             print(msg)
             ledger_add("paste-stopped", detail=" ".join(a[1:])[:300], reason=msg)
-            start_pwwatch()
     elif c == "contain" and len(a) > 1:
         if not os.path.lexists(a[1]):
             sys.exit("No such file: " + a[1])
@@ -928,7 +664,7 @@ def main():
         if lvl == "bad" and "--contain" in a:
             contain(target, "removed by you after check")
         sys.exit(1 if lvl in ("bad", "missing") else 0)
-    elif c == "undo-all":  # uninstall: every setting change, and every app back out of the Safe Box
+    elif c == "undo-all":  # uninstall: every setting change
         es = _entries()
         done = {e.get("ref") for e in es if e["kind"] == "undone"}
         for e in reversed(es):
@@ -938,8 +674,6 @@ def main():
         refresh_blocklist(); purge()
     elif c == "purge":
         print(f"Deleted {purge()} quarantined item(s) older than {KEEP_DAYS} days.")
-    elif c == "pwwatch":
-        pwwatch()
     elif c == "undo" and len(a) > 1:
         if a[1].upper().startswith("S") and not IS_ROOT:
             print(f"System change. Run: sudo \"{ROOT_TOOL}\" undo {a[1][1:]}")
@@ -949,66 +683,11 @@ def main():
         sys.exit(1 if full_scan() else 0)
     elif c == "verify":
         sys.exit(0 if verify() else 1)
-    elif c == "safebox" and a[1:2] == ["list"]:
-        boxed = sorted(os.listdir(SAFEBOX)) if os.path.isdir(SAFEBOX) else []
-        print("\n".join(boxed) or "No apps in the Safe Box.")
-    elif c == "safebox" and len(a) > 2 and a[1] in ("open", "wrap"):
-        app = os.path.abspath(a[-1])
-        if a[1] == "wrap":
-            sys.exit(0 if safebox_wrap(app, "put in the Safe Box by you") else 1)
-        safebox_open(app, exec_=("--exec" in a))
-    elif c == "vpn":
-        sub = a[1] if len(a) > 1 else "status"
-        fn = {"on": lambda: vpn_set("on"), "off": lambda: vpn_set("off"), "auto": lambda: vpn_set("auto"),
-              "check": vpn_check, "trust": lambda: vpn_trust(True), "untrust": lambda: vpn_trust(False),
-              "status": vpn_status, "--json": lambda: json.dumps(vpn_state())}.get(sub)
-        if not fn:
-            sys.exit("Usage: leviathan vpn [on|off|auto|check|trust|untrust|status]")
-        print(fn())
     elif c == "status":
         status()
-    elif not LP:
-        sys.exit("leviathan: levplus.py is missing; reinstall Leviathan")
-    elif c == "mode":
-        if len(a) >= 3 and a[1] == "agents" and a[2] in ("on", "off"):
-            LP.set_mode("agents", a[2] == "on")
-            print(f"AI agents watch: {a[2]}")
-        elif len(a) == 2 and a[1] == "--json":
-            print(json.dumps(LP.get_modes()))
-        elif len(a) == 1:
-            print(f"  agents: {'on' if LP.get_modes()['agents'] else 'off'}")
-        else:
-            sys.exit("Usage: leviathan mode agents on|off")
-    elif c == "note-event" and len(a) >= 3:
-        print(LP.note_event(a[1], " ".join(a[2:])))
     elif c == "pkg" and len(a) > 1:
-        print(LP.pkg_inspect(a[1]))
-    elif c == "agents":
-        sub = a[1] if len(a) > 1 else ""
-        if sub in ("pause", "resume"):
-            print(LP.agents_pause() if sub == "pause" else LP.agents_resume())
-        elif sub == "canary":
-            print(LP.agents_canary_on() if a[2:3] == ["on"] else LP.agents_check())
-        elif sub == "config":
-            print(LP.agents_config_audit())
-        elif sub == "monitor":
-            print(LP.agents_monitor())
-        elif sub == "tripped":
-            print(LP.agents_tripped())
-        elif sub == "report":
-            print(LP.agents_report("--jsonl" in a))
-        elif sub == "run":
-            sys.exit(LP.agents_run(a[a.index("--") + 1:] if "--" in a else a[2:]))
-        elif sub == "":
-            procs = LP.agent_procs()
-            for pid, name in procs:
-                print(f"  {pid}  {name}")
-            if not procs:
-                print("No AI agent processes found.")
-        else:
-            sys.exit("Usage: leviathan agents [pause|resume|canary [on]|config|monitor|tripped|report [--jsonl]|run -- CMD]")
-    elif c == "ai" and a[1:2] == ["safety"]:
-        print(LP.ai_safety_check())
+        import levplus
+        print(levplus.pkg_inspect(a[1]))
     else:
         sys.exit("leviathan: unknown command or missing argument: %s\nCommands: see the README" % " ".join(a))
 

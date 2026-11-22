@@ -15,7 +15,6 @@ PY="$P/bin/python3"
 mkdir -p "$S/bin" "$S/quarantine"; chmod 700 "$S"
 rm -f "$S/bin/bip39.txt" "$S/bin/dnswatch.sh" "$S/bin/install-root.sh" "$S/bin/fix-filter.command" "$S/bin/fix-filter.sh"  # parts of older versions
 cp "$SRC/leviathan.py" "$SRC/levplus.py" "$SRC/uninstall.sh" "$SRC/website-filter.mobileconfig" "$S/bin/"
-mkdir -p "$S/bin/safebox"; cp "$SRC/safebox/leviathan-safebox" "$SRC/safebox/launcher.c" "$S/bin/safebox/"
 for g in bash zsh; do sed "s#__PY__#$PY#g" "$SRC/guard.$g" > "$S/bin/guard.$g"; done
 chmod +x "$S/bin/leviathan.py"; touch "$S/ledger.jsonl"; chmod 600 "$S/ledger.jsonl"
 mkdir -p "$HOME/.local/bin"; rm -f "$HOME/.local/bin/leviathan"
@@ -58,23 +57,9 @@ curl -fsSL --max-time 90 https://raw.githubusercontent.com/hagezi/dns-blocklists
 
 # baseline: record what's already here so only new things get judged
 "$PY" "$S/bin/leviathan.py" scan-all
-[ -d "$HOME/.leviathan-canary" ] && "$PY" "$S/bin/leviathan.py" agents canary on >/dev/null  # rewrite decoys made by older versions
-cat > "$LA/com.leviathan.agentwatch.plist" <<EOF
-<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict><key>Label</key><string>com.leviathan.agentwatch</string>
-<key>ProgramArguments</key><array><string>$PY</string><string>$S/bin/leviathan.py</string><string>agents</string><string>monitor</string></array>
-<key>StartInterval</key><integer>300</integer><key>ThrottleInterval</key><integer>60</integer><key>LowPriorityIO</key><true/><key>Nice</key><integer>10</integer></dict></plist>
-EOF
-# vpnwatch: turns the VPN on or off each time the Mac joins a network
-cat > "$LA/com.leviathan.vpnwatch.plist" <<EOF
-<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict><key>Label</key><string>com.leviathan.vpnwatch</string>
-<key>ProgramArguments</key><array><string>$PY</string><string>$S/bin/leviathan.py</string><string>vpn</string><string>check</string></array>
-<key>WatchPaths</key><array><string>/Library/Preferences/SystemConfiguration</string></array>
-<key>ThrottleInterval</key><integer>10</integer><key>LowPriorityIO</key><true/><key>Nice</key><integer>10</integer></dict></plist>
-EOF
-[ -f "$S/vpn.json" ] || "$PY" "$S/bin/leviathan.py" vpn trust >/dev/null  # the network you install on (usually home) is trusted
-for j in watch weekly persistwatch agentwatch vpnwatch; do launchctl bootout gui/$U "$LA/com.leviathan.$j.plist" 2>/dev/null || true; launchctl bootstrap gui/$U "$LA/com.leviathan.$j.plist"; done
+# 4.0 removed the AI agent watch and the VPN: switch off what older versions installed
+for j in agentwatch vpnwatch; do launchctl bootout gui/$U "$LA/com.leviathan.$j.plist" 2>/dev/null || true; rm -f "$LA/com.leviathan.$j.plist"; done
+for j in watch weekly persistwatch; do launchctl bootout gui/$U "$LA/com.leviathan.$j.plist" 2>/dev/null || true; launchctl bootstrap gui/$U "$LA/com.leviathan.$j.plist"; done
 
 # Menu bar app: build it when swiftc exists, else use the prebuilt copy the release zip ships
 APP_SRC=""

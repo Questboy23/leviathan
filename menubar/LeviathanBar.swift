@@ -11,7 +11,6 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
 
     let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     let menu = NSMenu()
-    var watchAgents = false
     var filterOn: Bool? = nil     // nil until the first background check; nil also when offline
     var hasUnreadAlert: Bool = false
     var activeTasks = 0          // menu actions still running (main thread only)
@@ -31,7 +30,7 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
         setupUI()
         requestNotificationAuth()
         checkNotificationAuth()
-        startPasswordBoxMonitor()
+        startBusyMonitor()
         startFilterCheck()
         refreshStatus()
     }
@@ -59,14 +58,14 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
-    var passwordBoxSource: DispatchSourceTimer?
-    func startPasswordBoxMonitor() {
-        // Runs on its own queue: an alert or open menu on the main thread can never pause this guard.
+    var busySource: DispatchSourceTimer?
+    func startBusyMonitor() {
+        // Every 15 s: turns the shield green while a scan runs.
         let t = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
-        t.schedule(deadline: .now() + 3, repeating: 3.0)
-        t.setEventHandler { [weak self] in self?.checkPasswordBoxes() }
+        t.schedule(deadline: .now() + 3, repeating: 15.0)
+        t.setEventHandler { [weak self] in self?.checkBusy() }
         t.resume()
-        passwordBoxSource = t
+        busySource = t
     }
 
     @objc func statusItemClicked() {
@@ -77,16 +76,8 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
         refreshStatus()
     }
 
-    /// Reads ~/.leviathan/settings.json directly (the file `leviathan mode agents on|off` writes),
-    /// then rebuilds the menu. Main thread only.
     func refreshStatus() {
-        let installed = FileManager.default.fileExists(atPath: leviathanBin)
-        let url = URL(fileURLWithPath: NSHomeDirectory() + "/.leviathan/settings.json")
-        if let data = try? Data(contentsOf: url),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            watchAgents = (json["modes"] as? [String: Any])?["agents"] as? Bool ?? false
-        }
-        updateMenu(installed: installed)
+        updateMenu(installed: FileManager.default.fileExists(atPath: leviathanBin))
     }
 
     func updateMenu(installed: Bool) {
@@ -99,22 +90,12 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
             addQuitItem()
             return
         }
-        let head = NSMenuItem(title: "Leviathan is on" + (watchAgents ? " • watching AI agents" : ""), action: nil, keyEquivalent: "")
+        let head = NSMenuItem(title: "Leviathan is on", action: nil, keyEquivalent: "")
         head.isEnabled = false
         menu.addItem(head)
         if filterOn == false {
             add("⚠︎ Turn on website filter…", #selector(turnOnFilter))
         }
-        menu.addItem(NSMenuItem.separator())
-        let watch = add("Watch AI agents", #selector(toggleAgents))
-        watch.state = watchAgents ? .on : .off
-        add("Pause all AI agents", #selector(pauseAgents))
-        add("Resume all AI agents", #selector(resumeAgents))
-        add("AI safety check", #selector(runAISafety))
-        menu.addItem(NSMenuItem.separator())
-        let vpn = add("VPN on untrusted Wi-Fi", #selector(toggleVPN))
-        vpn.state = vpnMode() == "off" ? .off : .on
-        add("Trust this network (no VPN here)", #selector(trustNetwork))
         menu.addItem(NSMenuItem.separator())
         add("Check installer…", #selector(checkInstaller))
         add("Recent activity", #selector(showRecentActivity))
@@ -128,38 +109,6 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
         item.target = self
         menu.addItem(item)
         return item
-    }
-
-    @objc func toggleAgents() {
-        watchAgents.toggle()  // checkmark moves at once; the CLI writes the file
-        runCLIAsync(["mode", "agents", watchAgents ? "on" : "off"]) { [weak self] _ in self?.refreshStatus() }
-    }
-
-    @objc func pauseAgents() {
-        runCLIAsync(["agents", "pause"]) { [weak self] output in self?.showResult("Pause agents", output) }
-    }
-
-    @objc func resumeAgents() {
-        runCLIAsync(["agents", "resume"]) { [weak self] output in self?.showResult("Resume agents", output) }
-    }
-
-    /// Reads ~/.leviathan/vpn.json directly so the menu opens with no Python call.
-    func vpnMode() -> String {
-        let url = URL(fileURLWithPath: NSHomeDirectory() + "/.leviathan/vpn.json")
-        guard let d = try? Data(contentsOf: url), let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return "auto" }
-        return j["mode"] as? String ?? "auto"
-    }
-
-    @objc func toggleVPN() {
-        runCLIAsync(["vpn", vpnMode() == "off" ? "auto" : "off"], timeout: 60) { [weak self] output in self?.showResult("VPN", output) }
-    }
-
-    @objc func trustNetwork() {
-        runCLIAsync(["vpn", "trust"], timeout: 60) { [weak self] output in self?.showResult("VPN", output) }
-    }
-
-    @objc func runAISafety() {
-        runCLIAsync(["ai", "safety"], timeout: 60) { [weak self] output in self?.showResult("AI safety check", output) }
     }
 
     /// The filter is on when this Mac's DNS is Quad9: only Quad9 answers on.quad9.net with 216.21.3.77. Checked every 5 minutes off the main thread.
@@ -219,76 +168,17 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
         menu.addItem(quitItem)
     }
 
-    var cleanOsascript = Set<String>()  // already checked and harmless: skip re-reading its script every 3 s
-
     // Background scans and checks that turn the shield green while they run.
-    static let busyArgs = [" scan", " scan-all", " scan-apps", " scan-persist", " scan-downloads", " agents monitor", " sweep", " ai safety", " pkg ", " check "]
+    static let busyArgs = [" scan", " scan-all", " scan-apps", " scan-persist", " scan-downloads", " pkg ", " check "]
 
-    func checkPasswordBoxes() {
-        let result = runCLI(["-axwwo", "pid=,ppid=,command="], timeout: 5, exe: "/bin/ps")  // ww: full command lines, or a long inline script is cut before the part that matters
-        var procs: [String: (ppid: String, cmd: String)] = [:]
-        for line in result.split(separator: "\n") {
-            let parts = line.split(separator: " ", maxSplits: 2)
-            if parts.count == 3 { procs[String(parts[0])] = (String(parts[1]), String(parts[2]).trimmingCharacters(in: .whitespaces)) }  // ps pads columns
-        }
-        let busy = procs.values.contains { p in p.cmd.contains("leviathan.py") && LeviathanBar.busyArgs.contains { p.cmd.contains("leviathan.py" + $0) } }
+    func checkBusy() {
+        let out = runCLI(["-axo", "command="], timeout: 5, exe: "/bin/ps")
+        let busy = out.split(separator: "\n").contains { l in LeviathanBar.busyArgs.contains { l.contains("leviathan.py" + $0) } }
         DispatchQueue.main.async { [weak self] in
             guard let self = self, self.backgroundBusy != busy else { return }
             self.backgroundBusy = busy
             self.updateIconColor()
         }
-        var killed: [String] = []
-        for (pid, pr) in procs {
-            let prog = (String(pr.cmd.split(separator: " ").first ?? "") as NSString).lastPathComponent
-            guard prog == "osascript", !cleanOsascript.contains(pid + pr.cmd) else { continue }
-            guard asksHiddenAnswer(pr.cmd), !typedAtTerminalPrompt(pid, procs) else { cleanOsascript.insert(pid + pr.cmd); continue }
-            if let p = Int32(pid) { kill(p, SIGKILL) }
-            killed.append(pid)
-        }
-        if cleanOsascript.count > 5000 { cleanOsascript.removeAll() }
-        for pid in killed {
-            _ = runCLI(["note-event", "password-box", pid], timeout: 10)
-            hasUnreadAlert = true
-            updateIconColor()
-            showWarning("Fake password box blocked", "Terminated osascript PID \(pid)")
-        }
-    }
-
-    // True when the inline script, or a script file it runs, asks for a hidden answer (AppleScript or JavaScript).
-    func asksHiddenAnswer(_ cmd: String) -> Bool {
-        func hit(_ t: String) -> Bool { t.lowercased().components(separatedBy: .whitespacesAndNewlines).joined().contains("hiddenanswer") }
-        if hit(cmd) { return true }
-        // shortcut: splits on spaces, so a script path containing spaces is missed; scripts fed on stdin are never seen
-        for arg in cmd.split(separator: " ").dropFirst() where arg.hasPrefix("/") || arg.hasSuffix(".scpt") || arg.hasSuffix(".applescript") || arg.hasSuffix(".js") {
-            let path = String(arg)
-            // regular files under 1 MB only: /dev/zero or a pipe would hang this guard
-            guard let at = try? FileManager.default.attributesOfItem(atPath: path), at[.type] as? FileAttributeType == .typeRegular,
-                  (at[.size] as? NSNumber)?.intValue ?? Int.max < 1_000_000,
-                  let data = FileManager.default.contents(atPath: path) else { continue }
-            if let text = String(data: data.prefix(65536), encoding: .utf8), hit(text) { return true }
-            if path.hasSuffix(".scpt") && hit(runCLI([path], timeout: 5, exe: "/usr/bin/osadecompile")) { return true }
-        }
-        return false
-    }
-
-    // Real executable path from the kernel; argv[0] in ps output can be set to anything.
-    func exePath(_ pid: String) -> String {
-        guard let p = Int32(pid) else { return "" }
-        var buf = [CChar](repeating: 0, count: 4096)
-        return proc_pidpath(p, &buf, UInt32(buf.count)) > 0 ? String(cString: buf) : ""
-    }
-
-    // Exempt only an osascript typed straight at a Terminal or iTerm prompt: osascript, then a shell, then login or the
-    // terminal itself. A script run by a pasted `curl | bash` has an extra shell in between, so it is still blocked.
-    func typedAtTerminalPrompt(_ pid: String, _ procs: [String: (ppid: String, cmd: String)]) -> Bool {
-        let terminals = ["/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal",
-                         "/Applications/iTerm.app/Contents/MacOS/iTerm2"]
-        let shells = ["/bin/zsh", "/bin/bash", "/bin/sh", "/opt/homebrew/bin/fish", "/opt/homebrew/bin/bash"]
-        guard let shell = procs[pid]?.ppid, shells.contains(exePath(shell)),
-              let up = procs[shell]?.ppid else { return false }
-        if terminals.contains(exePath(up)) { return true }
-        guard exePath(up) == "/usr/bin/login", let term = procs[up]?.ppid else { return false }
-        return terminals.contains(exePath(term))
     }
 
     var notificationAuthorized = false
