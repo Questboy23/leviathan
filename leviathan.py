@@ -85,16 +85,12 @@ def verify():
 
 
 def notify(msg, urgent=False):
-    """Notification banner. urgent also opens an alert window, which Focus and Do Not Disturb
-    do not hide; it closes itself after 10 minutes and does not block the caller."""
+    """Notification banner only. Never a window with an OK button."""
     if QUIET:
         print("URGENT:" if urgent else "NOTIFY:", msg)
         return
     safe = msg.replace("\\", "").replace('"', "'")
     run(["osascript", "-e", f'display notification "{safe}" with title "Leviathan"'])
-    if urgent:
-        subprocess.Popen(["osascript", "-e", f'display alert "Leviathan" message "{safe}" as critical giving up after 600'],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
 
 # ---------- detection ----------

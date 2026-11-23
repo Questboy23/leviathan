@@ -218,7 +218,7 @@ final class LeviathanBar: NSObject, NSMenuDelegate {
             let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
             UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
         } else {
-            DispatchQueue.main.async { self.showAlert(title, message) }  // never block the timer that called us
+            // no notification permission: stay silent, the orange shield and `leviathan log` carry the warning (never an OK window)
         }
     }
 
